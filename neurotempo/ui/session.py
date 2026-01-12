@@ -4,9 +4,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout, QProgressBar, QFrame
 )
 from PySide6.QtCore import Qt, QTimer
+
 import pyqtgraph as pg
 
 from neurotempo.brain.sim_session import SessionSimulator
+from neurotempo.core.logger import SessionLogger
+from neurotempo.core.notify import notify
 
 
 def bar_color(value: float) -> str:
@@ -30,11 +33,24 @@ def card() -> QFrame:
 
 
 class SessionScreen(QWidget):
+    """
+    Live Session Screen (simulated for now):
+    - Focus bar + fatigue bar
+    - HR + SpO2 + status cards
+    - Two real-time charts: Focus trend + Heart Rate trend
+    - Session logging to CSV
+    - Cross-platform notification when focus is low for ~10 seconds
+    """
     def __init__(self, baseline_focus: float):
         super().__init__()
         self.sim = SessionSimulator(baseline_focus)
 
-        # history buffers (60 points)
+        # Logging + notification state
+        self.logger = SessionLogger()
+        self.low_focus_streak = 0
+        self.notified_break = False
+
+        # History buffers (60 points)
         self.max_points = 60
         self.focus_hist = deque([baseline_focus] * self.max_points, maxlen=self.max_points)
         self.hr_hist = deque([72] * self.max_points, maxlen=self.max_points)
@@ -49,7 +65,7 @@ class SessionScreen(QWidget):
         subtitle.setObjectName("muted")
         subtitle.setAlignment(Qt.AlignLeft)
 
-        # Bars (inside a card)
+        # Bars card
         bars_card = card()
         bars_layout = QVBoxLayout(bars_card)
         bars_layout.setContentsMargins(16, 14, 16, 14)
@@ -66,7 +82,7 @@ class SessionScreen(QWidget):
         bars_layout.addWidget(self.focus_bar)
         bars_layout.addWidget(self.fatigue_bar)
 
-        # Vitals (three small cards)
+        # Vitals row (3 cards)
         vitals_row = QHBoxLayout()
         vitals_row.setSpacing(12)
 
@@ -106,7 +122,7 @@ class SessionScreen(QWidget):
         vitals_row.addWidget(self.spo2_card)
         vitals_row.addWidget(self.state_card)
 
-        # Charts (in one card)
+        # Charts card
         charts_card = card()
         charts_layout = QVBoxLayout(charts_card)
         charts_layout.setContentsMargins(12, 12, 12, 12)
@@ -146,13 +162,27 @@ class SessionScreen(QWidget):
         root.addLayout(vitals_row)
         root.addWidget(charts_card)
 
-        # Timer
+        # Timer (1 second tick)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_metrics)
         self.timer.start(1000)
 
     def update_metrics(self):
         m = self.sim.read()
+
+        # Log each tick
+        self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
+
+        # Low-focus detection (~10 seconds)
+        if m.focus < 0.40:
+            self.low_focus_streak += 1
+        else:
+            self.low_focus_streak = 0
+            self.notified_break = False
+
+        if self.low_focus_streak >= 10 and not self.notified_break:
+            notify("Neurotempo", "Focus is low. Take a 2–5 minute reset break.")
+            self.notified_break = True
 
         # Bars
         focus_pct = int(m.focus * 100)
@@ -172,7 +202,7 @@ class SessionScreen(QWidget):
         self.hr_value.setText(f"{m.heart_rate} bpm")
         self.spo2_value.setText(f"{m.spo2} %")
 
-        # Status + color-coded feedback
+        # Status
         if m.focus >= 0.65:
             status = "🟢 Keep working"
         elif m.focus >= 0.45:
@@ -184,6 +214,11 @@ class SessionScreen(QWidget):
         # Charts
         self.focus_hist.append(m.focus)
         self.hr_hist.append(m.heart_rate)
-
         self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
         self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
+
+    def closeEvent(self, event):
+        try:
+            self.logger.close()
+        finally:
+            super().closeEvent(event)
