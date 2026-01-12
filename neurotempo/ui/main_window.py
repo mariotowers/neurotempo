@@ -18,6 +18,7 @@ from neurotempo.ui.presession import PreSessionScreen
 from neurotempo.ui.calibration import CalibrationScreen
 from neurotempo.ui.session import SessionScreen
 from neurotempo.ui.summary import SummaryScreen
+from neurotempo.ui.history import SessionHistoryScreen
 
 
 class MainWindow(QMainWindow):
@@ -94,12 +95,18 @@ class MainWindow(QMainWindow):
         self.calibration = CalibrationScreen(seconds=30, on_done=self.go_session)
 
         self.session = None
-        self.summary = SummaryScreen(on_done=self.go_presession)
+
+        # ✅ Summary Done now goes to HISTORY (not presession)
+        self.summary = SummaryScreen(on_done=self.go_history)
+
+        # History: Back -> Summary, New Session -> PreSession
+        self.history = SessionHistoryScreen(on_back=self.go_summary_screen, on_new_session=self.go_presession)
 
         self.stack.addWidget(self.splash)
         self.stack.addWidget(self.presession)
         self.stack.addWidget(self.calibration)
         self.stack.addWidget(self.summary)
+        self.stack.addWidget(self.history)
         self.stack.setCurrentWidget(self.splash)
 
         # Place safely below the macOS menu bar / notch
@@ -141,7 +148,7 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
-    # ---- Navigation (NO transitions)
+    # ---- Navigation
     def go_presession(self):
         self.stack.setCurrentWidget(self.presession)
 
@@ -160,6 +167,14 @@ class MainWindow(QMainWindow):
     def go_summary(self, summary: dict):
         self.summary.set_summary(summary)
         self.stack.setCurrentWidget(self.summary)
+
+    def go_summary_screen(self):
+        # Called by History "Back"
+        self.stack.setCurrentWidget(self.summary)
+
+    def go_history(self):
+        # Called by Summary "Done"
+        self.stack.setCurrentWidget(self.history)
 
 
 def launch_app():
