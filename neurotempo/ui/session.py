@@ -52,7 +52,9 @@ class SessionScreen(QWidget):
         # Logging + notification state
         self.logger = SessionLogger()
         self.store = SessionStore()
-        
+
+        # Debug (optional)
+        print(f"[Neurotempo] Sessions saved to: {self.store.path}")
 
         self.low_focus_streak = 0
         self.notified_break = False
@@ -62,6 +64,8 @@ class SessionScreen(QWidget):
         self.start_ts = time.time()
         self.samples = 0
         self.focus_sum = 0.0
+        self.hr_sum = 0
+        self.spo2_sum = 0
 
         # History buffers (60 points)
         self.max_points = 60
@@ -207,6 +211,8 @@ class SessionScreen(QWidget):
         # stats
         self.samples += 1
         self.focus_sum += m.focus
+        self.hr_sum += int(m.heart_rate)
+        self.spo2_sum += int(m.spo2)
 
         # logging
         self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
@@ -257,27 +263,29 @@ class SessionScreen(QWidget):
         self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
     def end_session(self):
-        # stop updates
         if self.timer.isActive():
             self.timer.stop()
 
-        # close logger
         try:
             self.logger.close()
         except Exception:
             pass
 
         duration_s = int(time.time() - self.start_ts)
+
         avg_focus = (self.focus_sum / self.samples) if self.samples > 0 else self.baseline_focus
+        avg_hr = int(round(self.hr_sum / self.samples)) if self.samples > 0 else 0
+        avg_spo2 = int(round(self.spo2_sum / self.samples)) if self.samples > 0 else 0
 
         summary = {
             "duration_s": duration_s,
             "baseline": self.baseline_focus,
             "avg_focus": max(0.0, min(1.0, avg_focus)),
             "breaks": self.breaks_triggered,
+            "avg_hr": avg_hr,
+            "avg_spo2": avg_spo2,
         }
 
-        # ✅ Save per-user, cross-platform (macOS + Windows)
         try:
             self.store.append_from_summary(summary)
         except Exception:

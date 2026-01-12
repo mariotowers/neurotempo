@@ -8,11 +8,6 @@ from PySide6.QtCore import QStandardPaths
 
 
 def _app_data_dir() -> Path:
-    """
-    Cross-platform per-user app data dir.
-    macOS:   ~/Library/Application Support/<Organization>/<AppName> (Qt-managed)
-    Windows: C:\\Users\\<user>\\AppData\\Roaming\\<Organization>\\<AppName> (Qt-managed)
-    """
     base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
     p = Path(base)
     p.mkdir(parents=True, exist_ok=True)
@@ -34,7 +29,9 @@ class SessionRecord:
     baseline: float
     avg_focus: float
     breaks: int
-    version: int = 1
+    avg_hr: int = 0
+    avg_spo2: int = 0
+    version: int = 2
 
 
 class SessionStore:
@@ -47,18 +44,14 @@ class SessionStore:
         try:
             with self.path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, list):
-                return data
-            return []
+            return data if isinstance(data, list) else []
         except Exception:
-            # If the file is corrupted, don't crash the app.
             return []
 
     def append(self, record: SessionRecord) -> None:
         items = self.load()
         items.append(asdict(record))
 
-        # atomic-ish write
         tmp = self.path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
@@ -71,5 +64,7 @@ class SessionStore:
             baseline=float(summary.get("baseline", 0.0)),
             avg_focus=float(summary.get("avg_focus", 0.0)),
             breaks=int(summary.get("breaks", 0)),
+            avg_hr=int(summary.get("avg_hr", 0)),
+            avg_spo2=int(summary.get("avg_spo2", 0)),
         )
         self.append(rec)

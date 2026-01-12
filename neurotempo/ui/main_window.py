@@ -19,6 +19,7 @@ from neurotempo.ui.calibration import CalibrationScreen
 from neurotempo.ui.session import SessionScreen
 from neurotempo.ui.summary import SummaryScreen
 from neurotempo.ui.history import SessionHistoryScreen
+from neurotempo.ui.session_detail import SessionDetailScreen
 
 
 class MainWindow(QMainWindow):
@@ -28,18 +29,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Neurotempo")
         self.resize(980, 680)
 
-        # Frameless + translucent background (needed for real rounded corners)
         self.setWindowFlag(Qt.FramelessWindowHint, True)
-        self.setWindowFlag(Qt.Tool, True)  # better macOS floating utility behavior
+        self.setWindowFlag(Qt.Tool, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
-        self._radius = 18  # corner radius
-        self._shadow_margin = 22  # space around for shadow
+        self._radius = 18
+        self._shadow_margin = 22
 
-        # ---- Outer transparent container (space for shadow + mask)
+        # ---- Outer container (FIXED)
         outer = QWidget()
         outer.setAttribute(Qt.WA_TranslucentBackground, True)
-        outer.setStyleSheet("background: transparent;")
 
         outer_layout = QVBoxLayout(outer)
         outer_layout.setContentsMargins(
@@ -50,103 +49,85 @@ class MainWindow(QMainWindow):
         )
         outer_layout.setSpacing(0)
 
-        # ---- Inner rounded container (actual app surface)
+        # ---- Inner container
         self.container = QWidget()
-        self.container.setObjectName("appContainer")
         self.container.setStyleSheet(f"""
-            QWidget#appContainer {{
-                background: rgba(11, 15, 20, 0.96);
+            QWidget {{
+                background: rgba(11,15,20,0.96);
                 border-radius: {self._radius}px;
             }}
         """)
 
-        # Drop shadow
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(42)
         shadow.setOffset(0, 10)
-        shadow.setColor(Qt.black)
         self.container.setGraphicsEffect(shadow)
 
-        container_layout = QVBoxLayout(self.container)
-        container_layout.setContentsMargins(12, 12, 12, 12)
-        container_layout.setSpacing(10)
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        # Titlebar + Stack
         self.titlebar = TitleBar(self, "Neurotempo")
-
         self.stack = QStackedWidget()
-        self.stack.setStyleSheet("""
-            QStackedWidget {
-                background: rgba(255,255,255,0.02);
-                border: 1px solid rgba(255,255,255,0.06);
-                border-radius: 14px;
-            }
-        """)
 
-        container_layout.addWidget(self.titlebar)
-        container_layout.addWidget(self.stack)
+        layout.addWidget(self.titlebar)
+        layout.addWidget(self.stack)
 
         outer_layout.addWidget(self.container)
         self.setCentralWidget(outer)
 
         # ---- Screens
-        self.splash = SplashDisclaimer(on_continue=self.go_presession)
-        self.presession = PreSessionScreen(on_start=self.go_calibration)
-        self.calibration = CalibrationScreen(seconds=30, on_done=self.go_session)
+        self.splash = SplashDisclaimer(self.go_presession)
+        self.presession = PreSessionScreen(self.go_calibration)
+        self.calibration = CalibrationScreen(30, self.go_session)
+        self.summary = SummaryScreen(self.go_history)
+
+        self.history = SessionHistoryScreen(
+            on_back=self.go_summary_screen,
+            on_new_session=self.go_presession,
+            on_open_detail=self.go_detail,
+        )
+
+        self.detail = SessionDetailScreen(on_back=self.go_history)
 
         self.session = None
 
-        # ✅ Summary Done now goes to HISTORY (not presession)
-        self.summary = SummaryScreen(on_done=self.go_history)
+        for screen in (
+            self.splash,
+            self.presession,
+            self.calibration,
+            self.summary,
+            self.history,
+            self.detail,
+        ):
+            self.stack.addWidget(screen)
 
-        # History: Back -> Summary, New Session -> PreSession
-        self.history = SessionHistoryScreen(on_back=self.go_summary_screen, on_new_session=self.go_presession)
-
-        self.stack.addWidget(self.splash)
-        self.stack.addWidget(self.presession)
-        self.stack.addWidget(self.calibration)
-        self.stack.addWidget(self.summary)
-        self.stack.addWidget(self.history)
         self.stack.setCurrentWidget(self.splash)
-
-        # Place safely below the macOS menu bar / notch
         self._place_safely()
 
     def _place_safely(self):
         screen = QGuiApplication.primaryScreen()
-        if not screen:
-            return
-        available = screen.availableGeometry()
-        self.move(available.x() + 80, available.y() + 80)
+        if screen:
+            g = screen.availableGeometry()
+            self.move(g.x() + 80, g.y() + 80)
 
-    # ---- Rounded WINDOW mask
     def _apply_rounded_mask(self):
-        w = self.width()
-        h = self.height()
-        m = self._shadow_margin
-        r = self._radius
+        w, h = self.width(), self.height()
+        m, r = self._shadow_margin, self._radius
 
         rect = QRectF(m, m, w - 2 * m, h - 2 * m)
-
         path = QPainterPath()
         path.addRoundedRect(rect, r, r)
 
-        polygon = path.toFillPolygon().toPolygon()
-        self.setMask(QRegion(polygon))
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
-    def showEvent(self, event):
-        super().showEvent(event)
+    def showEvent(self, e):
+        super().showEvent(e)
         self._apply_rounded_mask()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
         self._apply_rounded_mask()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.close()
-            return
-        super().keyPressEvent(event)
 
     # ---- Navigation
     def go_presession(self):
@@ -155,32 +136,33 @@ class MainWindow(QMainWindow):
     def go_calibration(self):
         self.stack.setCurrentWidget(self.calibration)
 
-    def go_session(self, baseline_focus: float):
-        if self.session is not None:
+    def go_session(self, baseline):
+        if self.session:
             self.stack.removeWidget(self.session)
             self.session.deleteLater()
 
-        self.session = SessionScreen(baseline_focus=baseline_focus, on_end=self.go_summary)
+        self.session = SessionScreen(baseline, self.go_summary)
         self.stack.addWidget(self.session)
         self.stack.setCurrentWidget(self.session)
 
-    def go_summary(self, summary: dict):
+    def go_summary(self, summary):
         self.summary.set_summary(summary)
         self.stack.setCurrentWidget(self.summary)
 
     def go_summary_screen(self):
-        # Called by History "Back"
         self.stack.setCurrentWidget(self.summary)
 
     def go_history(self):
-        # Called by Summary "Done"
         self.stack.setCurrentWidget(self.history)
+
+    def go_detail(self, record):
+        self.detail.set_record(record)
+        self.stack.setCurrentWidget(self.detail)
 
 
 def launch_app():
     app = QApplication(sys.argv)
 
-    # ✅ Set app identity for correct per-user storage path (macOS + Windows)
     QCoreApplication.setOrganizationName("Neurotempo")
     QCoreApplication.setApplicationName("Neurotempo")
 
