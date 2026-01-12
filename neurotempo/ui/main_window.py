@@ -1,6 +1,15 @@
 import sys
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget, QVBoxLayout
-from PySide6.QtCore import Qt
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QStackedWidget,
+    QWidget,
+    QVBoxLayout,
+    QGraphicsDropShadowEffect,
+)
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QPainterPath, QRegion
 
 from neurotempo.ui.style import APP_QSS
 from neurotempo.ui.titlebar import TitleBar
@@ -17,16 +26,52 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Neurotempo")
         self.resize(980, 680)
 
-        # Frameless + 80% opacity (spec)
+        # Frameless + translucent (needed for real rounded corners)
         self.setWindowFlag(Qt.FramelessWindowHint, True)
-        self.setWindowOpacity(0.80)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
-        # Root container: title bar + stacked screens
-        root = QWidget()
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(12, 12, 12, 12)
-        root_layout.setSpacing(10)
+        # Optional: your “floating widget” vibe
+        self.setWindowOpacity(0.90)
 
+        self._radius = 18  # corner radius
+        self._shadow_margin = 22  # space around for shadow
+
+        # ---- Outer transparent container (space for shadow + mask)
+        outer = QWidget()
+        outer.setAttribute(Qt.WA_TranslucentBackground, True)
+        outer.setStyleSheet("background: transparent;")
+
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(
+            self._shadow_margin,
+            self._shadow_margin,
+            self._shadow_margin,
+            self._shadow_margin,
+        )
+        outer_layout.setSpacing(0)
+
+        # ---- Inner rounded container (actual app surface)
+        self.container = QWidget()
+        self.container.setObjectName("appContainer")
+        self.container.setStyleSheet(f"""
+            QWidget#appContainer {{
+                background: #0b0f14;
+                border-radius: {self._radius}px;
+            }}
+        """)
+
+        # Drop shadow
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(42)
+        shadow.setOffset(0, 10)
+        shadow.setColor(Qt.black)
+        self.container.setGraphicsEffect(shadow)
+
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(12, 12, 12, 12)
+        container_layout.setSpacing(10)
+
+        # Titlebar + Stack
         self.titlebar = TitleBar(self, "Neurotempo")
 
         self.stack = QStackedWidget()
@@ -34,13 +79,15 @@ class MainWindow(QMainWindow):
             QStackedWidget {
                 background: rgba(255,255,255,0.02);
                 border: 1px solid rgba(255,255,255,0.06);
-                border-radius: 16px;
+                border-radius: 14px;
             }
         """)
 
-        root_layout.addWidget(self.titlebar)
-        root_layout.addWidget(self.stack)
-        self.setCentralWidget(root)
+        container_layout.addWidget(self.titlebar)
+        container_layout.addWidget(self.stack)
+
+        outer_layout.addWidget(self.container)
+        self.setCentralWidget(outer)
 
         # Screens
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
@@ -53,8 +100,31 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.calibration)
         self.stack.setCurrentWidget(self.splash)
 
+    # ---- Rounded WINDOW mask (this is the missing piece)
+    def _apply_rounded_mask(self):
+        # Mask should match the *outer* widget area (excluding shadow margin)
+        w = self.width()
+        h = self.height()
+        m = self._shadow_margin
+        r = self._radius
+
+        rect = QRectF(m, m, w - 2 * m, h - 2 * m)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, r, r)
+
+        polygon = path.toFillPolygon().toPolygon()
+        self.setMask(QRegion(polygon))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_rounded_mask()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_rounded_mask()
+
     def keyPressEvent(self, event):
-        # ESC closes the app (nice for frameless windows)
         if event.key() == Qt.Key_Escape:
             self.close()
             return
