@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QGraphicsDropShadowEffect,
 )
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, QCoreApplication
 from PySide6.QtGui import QPainterPath, QRegion, QGuiApplication
 
 from neurotempo.ui.style import APP_QSS
@@ -164,7 +164,14 @@ class MainWindow(QMainWindow):
 
 def launch_app():
     app = QApplication(sys.argv)
+
+    # ✅ Set app identity for correct per-user storage path (macOS + Windows)
+    QCoreApplication.setOrganizationName("Neurotempo")
+    QCoreApplication.setApplicationName("Neurotempo")
+
     app.setStyleSheet(APP_QSS)
+
     window = MainWindow()
     window.show()
+
     sys.exit(app.exec())

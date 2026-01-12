@@ -11,6 +11,7 @@ import pyqtgraph as pg
 from neurotempo.brain.sim_session import SessionSimulator
 from neurotempo.core.notify import notify
 from neurotempo.core.logger import SessionLogger
+from neurotempo.core.storage import SessionStore
 
 
 def bar_color(value: float) -> str:
@@ -39,6 +40,7 @@ class SessionScreen(QWidget):
     - End Session button (manual)
     - Tracks duration, avg focus, breaks triggered
     - Logs CSV + sends notification when focus is low for ~10s
+    - Saves session summary to per-user app data (macOS + Windows)
     """
     def __init__(self, baseline_focus: float, on_end):
         super().__init__()
@@ -49,6 +51,9 @@ class SessionScreen(QWidget):
 
         # Logging + notification state
         self.logger = SessionLogger()
+        self.store = SessionStore()
+        
+
         self.low_focus_streak = 0
         self.notified_break = False
         self.breaks_triggered = 0
@@ -271,6 +276,13 @@ class SessionScreen(QWidget):
             "avg_focus": max(0.0, min(1.0, avg_focus)),
             "breaks": self.breaks_triggered,
         }
+
+        # ✅ Save per-user, cross-platform (macOS + Windows)
+        try:
+            self.store.append_from_summary(summary)
+        except Exception:
+            pass
+
         self.on_end(summary)
 
     def closeEvent(self, event):
