@@ -1,10 +1,10 @@
 import sys
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget, QLabel
-from PySide6.QtCore import Qt
-
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 from neurotempo.ui.splash import SplashDisclaimer
 from neurotempo.ui.presession import PreSessionScreen
 from neurotempo.ui.calibration import CalibrationScreen
+from neurotempo.ui.session import SessionScreen
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -15,23 +15,21 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
+        # Screens
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
         self.presession = PreSessionScreen(on_start=self.go_calibration)
-        self.calibration = CalibrationScreen(seconds=30, on_done=self.go_home)
-        self.home = self._make_home()
+        self.calibration = CalibrationScreen(seconds=30, on_done=self.go_session)
 
+        # Session screen is created after calibration because it needs baseline_focus
+        self.session = None
+
+        # Add initial screens to the stack
         self.stack.addWidget(self.splash)
         self.stack.addWidget(self.presession)
         self.stack.addWidget(self.calibration)
-        self.stack.addWidget(self.home)
 
+        # Start at splash
         self.stack.setCurrentWidget(self.splash)
-
-    def _make_home(self) -> QWidget:
-        w = QWidget()
-        self.home_label = QLabel("Session screen next (live metrics + charts) ✅", w)
-        self.home_label.setAlignment(Qt.AlignCenter)
-        return w
 
     def go_presession(self):
         self.stack.setCurrentWidget(self.presession)
@@ -39,9 +37,16 @@ class MainWindow(QMainWindow):
     def go_calibration(self):
         self.stack.setCurrentWidget(self.calibration)
 
-    def go_home(self, baseline_focus: float):
-        self.home_label.setText(f"Baseline focus saved: {baseline_focus:.2f} ✅\nNext: Live session screen.")
-        self.stack.setCurrentWidget(self.home)
+    def go_session(self, baseline_focus: float):
+        # Create (or recreate) the session screen with today's baseline focus
+        if self.session is not None:
+            self.stack.removeWidget(self.session)
+            self.session.deleteLater()
+
+        self.session = SessionScreen(baseline_focus=baseline_focus)
+        self.stack.addWidget(self.session)
+        self.stack.setCurrentWidget(self.session)
+
 
 def launch_app():
     app = QApplication(sys.argv)
