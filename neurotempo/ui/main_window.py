@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
 )
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QPainterPath, QRegion
+from PySide6.QtGui import QPainterPath, QRegion, QGuiApplication
 
 from neurotempo.ui.style import APP_QSS
 from neurotempo.ui.titlebar import TitleBar
@@ -26,12 +26,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Neurotempo")
         self.resize(980, 680)
 
-        # Frameless + translucent (needed for real rounded corners)
+        # Frameless + translucent background (needed for real rounded corners)
         self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setWindowFlag(Qt.Tool, True)  # better macOS floating utility behavior
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
-        # Optional: your “floating widget” vibe
-        self.setWindowOpacity(0.90)
+        # ❌ DO NOT use setWindowOpacity on macOS (looks cheap + breaks shaping)
+        # self.setWindowOpacity(0.90)
 
         self._radius = 18  # corner radius
         self._shadow_margin = 22  # space around for shadow
@@ -55,7 +56,7 @@ class MainWindow(QMainWindow):
         self.container.setObjectName("appContainer")
         self.container.setStyleSheet(f"""
             QWidget#appContainer {{
-                background: #0b0f14;
+                background: rgba(11, 15, 20, 0.96);  /* clean premium surface */
                 border-radius: {self._radius}px;
             }}
         """)
@@ -100,9 +101,18 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.calibration)
         self.stack.setCurrentWidget(self.splash)
 
-    # ---- Rounded WINDOW mask (this is the missing piece)
+        # Place safely below the macOS menu bar / notch
+        self._place_safely()
+
+    def _place_safely(self):
+        screen = QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        available = screen.availableGeometry()
+        self.move(available.x() + 80, available.y() + 80)
+
+    # ---- Rounded WINDOW mask
     def _apply_rounded_mask(self):
-        # Mask should match the *outer* widget area (excluding shadow margin)
         w = self.width()
         h = self.height()
         m = self._shadow_margin

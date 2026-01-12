@@ -1,0 +1,4 @@
+PySide6
+pyqtgraph
+plyer; sys_platform == "darwin"
+win10toast; sys_platform == "win32"
