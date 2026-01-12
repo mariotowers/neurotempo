@@ -1,15 +1,16 @@
+import time
 from collections import deque
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QHBoxLayout, QProgressBar, QFrame
+    QWidget, QVBoxLayout, QLabel, QHBoxLayout, QProgressBar, QFrame, QPushButton
 )
 from PySide6.QtCore import Qt, QTimer
 
 import pyqtgraph as pg
 
 from neurotempo.brain.sim_session import SessionSimulator
-from neurotempo.core.logger import SessionLogger
 from neurotempo.core.notify import notify
+from neurotempo.core.logger import SessionLogger
 
 
 def bar_color(value: float) -> str:
@@ -34,32 +35,60 @@ def card() -> QFrame:
 
 class SessionScreen(QWidget):
     """
-    Live Session Screen (simulated for now):
-    - Focus bar + fatigue bar
-    - HR + SpO2 + status cards
-    - Two real-time charts: Focus trend + Heart Rate trend
-    - Session logging to CSV
-    - Cross-platform notification when focus is low for ~10 seconds
+    Live Session Screen
+    - End Session button (manual)
+    - Tracks duration, avg focus, breaks triggered
+    - Logs CSV + sends notification when focus is low for ~10s
     """
-    def __init__(self, baseline_focus: float):
+    def __init__(self, baseline_focus: float, on_end):
         super().__init__()
-        self.sim = SessionSimulator(baseline_focus)
+        self.baseline_focus = float(baseline_focus)
+        self.on_end = on_end
+
+        self.sim = SessionSimulator(self.baseline_focus)
 
         # Logging + notification state
         self.logger = SessionLogger()
         self.low_focus_streak = 0
         self.notified_break = False
+        self.breaks_triggered = 0
+
+        # Stats
+        self.start_ts = time.time()
+        self.samples = 0
+        self.focus_sum = 0.0
 
         # History buffers (60 points)
         self.max_points = 60
-        self.focus_hist = deque([baseline_focus] * self.max_points, maxlen=self.max_points)
+        self.focus_hist = deque([self.baseline_focus] * self.max_points, maxlen=self.max_points)
         self.hr_hist = deque([72] * self.max_points, maxlen=self.max_points)
         self.x_hist = deque(range(-self.max_points + 1, 1), maxlen=self.max_points)
 
-        # Title
+        # Header row: title + end button
+        header = QHBoxLayout()
+        header.setSpacing(12)
+
         title = QLabel("Live Session")
         title.setAlignment(Qt.AlignLeft)
         title.setStyleSheet("font-size: 24px; font-weight: 750; letter-spacing: 0.2px;")
+
+        self.end_btn = QPushButton("End Session")
+        self.end_btn.setCursor(Qt.PointingHandCursor)
+        self.end_btn.clicked.connect(self.end_session)
+        self.end_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(239,68,68,0.12);
+                border: 1px solid rgba(239,68,68,0.22);
+                border-radius: 14px;
+                padding: 10px 14px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: rgba(239,68,68,0.18); }
+            QPushButton:pressed { background: rgba(239,68,68,0.26); }
+        """)
+
+        header.addWidget(title, 1)
+        header.addWidget(self.end_btn, 0, Qt.AlignRight)
 
         subtitle = QLabel("Adaptive focus + fatigue feedback (simulated).")
         subtitle.setObjectName("muted")
@@ -82,7 +111,7 @@ class SessionScreen(QWidget):
         bars_layout.addWidget(self.focus_bar)
         bars_layout.addWidget(self.fatigue_bar)
 
-        # Vitals row (3 cards)
+        # Vitals row
         vitals_row = QHBoxLayout()
         vitals_row.setSpacing(12)
 
@@ -122,7 +151,7 @@ class SessionScreen(QWidget):
         vitals_row.addWidget(self.spo2_card)
         vitals_row.addWidget(self.state_card)
 
-        # Charts card
+        # Charts
         charts_card = card()
         charts_layout = QVBoxLayout(charts_card)
         charts_layout.setContentsMargins(12, 12, 12, 12)
@@ -155,14 +184,14 @@ class SessionScreen(QWidget):
         root.setContentsMargins(22, 20, 22, 20)
         root.setSpacing(12)
 
-        root.addWidget(title)
+        root.addLayout(header)
         root.addWidget(subtitle)
         root.addSpacing(6)
         root.addWidget(bars_card)
         root.addLayout(vitals_row)
         root.addWidget(charts_card)
 
-        # Timer (1 second tick)
+        # Timer tick
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_metrics)
         self.timer.start(1000)
@@ -170,7 +199,11 @@ class SessionScreen(QWidget):
     def update_metrics(self):
         m = self.sim.read()
 
-        # Log each tick
+        # stats
+        self.samples += 1
+        self.focus_sum += m.focus
+
+        # logging
         self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
 
         # Low-focus detection (~10 seconds)
@@ -183,6 +216,7 @@ class SessionScreen(QWidget):
         if self.low_focus_streak >= 10 and not self.notified_break:
             notify("Neurotempo", "Focus is low. Take a 2–5 minute reset break.")
             self.notified_break = True
+            self.breaks_triggered += 1
 
         # Bars
         focus_pct = int(m.focus * 100)
@@ -217,8 +251,32 @@ class SessionScreen(QWidget):
         self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
         self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
+    def end_session(self):
+        # stop updates
+        if self.timer.isActive():
+            self.timer.stop()
+
+        # close logger
+        try:
+            self.logger.close()
+        except Exception:
+            pass
+
+        duration_s = int(time.time() - self.start_ts)
+        avg_focus = (self.focus_sum / self.samples) if self.samples > 0 else self.baseline_focus
+
+        summary = {
+            "duration_s": duration_s,
+            "baseline": self.baseline_focus,
+            "avg_focus": max(0.0, min(1.0, avg_focus)),
+            "breaks": self.breaks_triggered,
+        }
+        self.on_end(summary)
+
     def closeEvent(self, event):
         try:
+            if self.timer.isActive():
+                self.timer.stop()
             self.logger.close()
         finally:
             super().closeEvent(event)

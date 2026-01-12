@@ -17,6 +17,7 @@ from neurotempo.ui.splash import SplashDisclaimer
 from neurotempo.ui.presession import PreSessionScreen
 from neurotempo.ui.calibration import CalibrationScreen
 from neurotempo.ui.session import SessionScreen
+from neurotempo.ui.summary import SummaryScreen
 
 
 class MainWindow(QMainWindow):
@@ -30,9 +31,6 @@ class MainWindow(QMainWindow):
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowFlag(Qt.Tool, True)  # better macOS floating utility behavior
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-
-        # ❌ DO NOT use setWindowOpacity on macOS (looks cheap + breaks shaping)
-        # self.setWindowOpacity(0.90)
 
         self._radius = 18  # corner radius
         self._shadow_margin = 22  # space around for shadow
@@ -56,7 +54,7 @@ class MainWindow(QMainWindow):
         self.container.setObjectName("appContainer")
         self.container.setStyleSheet(f"""
             QWidget#appContainer {{
-                background: rgba(11, 15, 20, 0.96);  /* clean premium surface */
+                background: rgba(11, 15, 20, 0.96);
                 border-radius: {self._radius}px;
             }}
         """)
@@ -90,15 +88,18 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.container)
         self.setCentralWidget(outer)
 
-        # Screens
+        # ---- Screens
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
         self.presession = PreSessionScreen(on_start=self.go_calibration)
         self.calibration = CalibrationScreen(seconds=30, on_done=self.go_session)
+
         self.session = None
+        self.summary = SummaryScreen(on_done=self.go_presession)
 
         self.stack.addWidget(self.splash)
         self.stack.addWidget(self.presession)
         self.stack.addWidget(self.calibration)
+        self.stack.addWidget(self.summary)
         self.stack.setCurrentWidget(self.splash)
 
         # Place safely below the macOS menu bar / notch
@@ -140,6 +141,7 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    # ---- Navigation (NO transitions)
     def go_presession(self):
         self.stack.setCurrentWidget(self.presession)
 
@@ -151,9 +153,13 @@ class MainWindow(QMainWindow):
             self.stack.removeWidget(self.session)
             self.session.deleteLater()
 
-        self.session = SessionScreen(baseline_focus=baseline_focus)
+        self.session = SessionScreen(baseline_focus=baseline_focus, on_end=self.go_summary)
         self.stack.addWidget(self.session)
         self.stack.setCurrentWidget(self.session)
+
+    def go_summary(self, summary: dict):
+        self.summary.set_summary(summary)
+        self.stack.setCurrentWidget(self.summary)
 
 
 def launch_app():

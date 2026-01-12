@@ -1,7 +1,9 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
+import sys
+
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication
 from PySide6.QtCore import Qt, QTimer
 
-from neurotempo.brain.focus_source import FocusSource
+from neurotempo.brain.sim_session import SessionSimulator
 
 
 class CalibrationScreen(QWidget):
@@ -13,7 +15,7 @@ class CalibrationScreen(QWidget):
         self._elapsed = 0
         self._running = False
         self._samples = []
-        self.focus_source = FocusSource()
+        self.sim = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
@@ -32,13 +34,21 @@ class CalibrationScreen(QWidget):
         instructions.setWordWrap(True)
         instructions.setStyleSheet("font-size: 15px; color: rgba(231,238,247,0.75);")
 
+        # ✅ Green check icon (hidden until complete)
+        self.check = QLabel("✓")
+        self.check.setAlignment(Qt.AlignCenter)
+        self.check.setStyleSheet("font-size: 44px; font-weight: 900; color: #22c55e;")
+        self.check.hide()
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFixedWidth(520)
         self.progress.setTextVisible(True)
+        self.progress.setFormat("%p%")
 
-        self.progress.setStyleSheet("""
+        # Visible progress bar fill (default in-progress style)
+        self._progress_style_running = """
             QProgressBar {
                 border: 1px solid rgba(255,255,255,0.14);
                 border-radius: 10px;
@@ -51,7 +61,23 @@ class CalibrationScreen(QWidget):
                 background: rgba(255,255,255,0.22);
                 border-radius: 10px;
             }
-        """)
+        """
+        self._progress_style_done = """
+            QProgressBar {
+                border: 1px solid rgba(255,255,255,0.18);
+                border-radius: 10px;
+                background: rgba(255,255,255,0.06);
+                height: 20px;
+                text-align: center;
+                color: #22c55e;
+                font-weight: 700;
+            }
+            QProgressBar::chunk {
+                background: #22c55e;
+                border-radius: 10px;
+            }
+        """
+        self.progress.setStyleSheet(self._progress_style_running)
 
         self.status = QLabel("Starting…")
         self.status.setAlignment(Qt.AlignCenter)
@@ -60,6 +86,7 @@ class CalibrationScreen(QWidget):
         root.addWidget(title)
         root.addWidget(instructions)
         root.addSpacing(8)
+        root.addWidget(self.check)
         root.addWidget(self.progress)
         root.addWidget(self.status)
 
@@ -74,32 +101,74 @@ class CalibrationScreen(QWidget):
     def start(self):
         if self._running:
             return
+
         self._running = True
         self._elapsed = 0
         self._samples = []
+        self.check.hide()
+
+        # Calibration reads from the SAME model as live session
+        self.sim = SessionSimulator(baseline_focus=0.60)
+
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        self.progress.setStyleSheet(self._progress_style_running)
+
         self.status.setText("Calibrating…")
         self.timer.start()
+
+    def _play_success_feedback(self):
+        # ✅ Simple cross-platform success sound (no assets needed)
+        try:
+            if sys.platform == "darwin":
+                import subprocess
+                subprocess.run(["osascript", "-e", "beep 1"], check=False)
+            elif sys.platform.startswith("win"):
+                try:
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _tick(self):
         self._elapsed += 1
 
-        # ✅ collect focus sample each second
-        self._samples.append(self.focus_source.sample_focus())
+        # sample focus from simulator
+        m = self.sim.read()
+        self._samples.append(m.focus)
 
         pct = int((self._elapsed / self.seconds) * 100)
         pct = max(0, min(100, pct))
         self.progress.setValue(pct)
 
+        # Finish
         if self._elapsed >= self.seconds:
             self.timer.stop()
             self._running = False
 
-            # ✅ compute baseline (average)
             baseline_focus = sum(self._samples) / max(1, len(self._samples))
             baseline_focus = max(0.0, min(1.0, baseline_focus))
+            baseline_pct = int(baseline_focus * 100)
 
-            self.status.setText(f"Done. Baseline: {int(baseline_focus*100)}%")
+            # Make completion visually obvious
+            self.progress.setValue(100)
+            self.progress.setFormat("Complete")
+            self.progress.setStyleSheet(self._progress_style_done)
 
-            # small delay so user can see baseline text
-            QTimer.singleShot(600, lambda: self.on_done(baseline_focus))
+            # ✅ Show green check + sound feedback
+            self.check.show()
+            self._play_success_feedback()
+
+            # Readable multi-line status + enough time to read
+            self.status.setText(
+                "Calibration complete\n"
+                f"Your baseline focus: {baseline_pct}%\n"
+                "Starting session…"
+            )
+            self.status.repaint()
+            QApplication.processEvents()
+
+            # Give the user time to read it
+            QTimer.singleShot(4000, lambda: self.on_done(baseline_focus))
