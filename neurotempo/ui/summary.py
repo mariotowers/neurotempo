@@ -1,10 +1,5 @@
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QFrame
 from PySide6.QtCore import Qt
-
-from neurotempo.core.storage import SessionStore
 
 
 def _card() -> QFrame:
@@ -30,31 +25,10 @@ def _format_duration(seconds: int) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def _parse_iso(ts: str) -> Optional[datetime]:
-    try:
-        dt = datetime.fromisoformat(ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
-def _relative_day_label(dt_utc: datetime) -> str:
-    now = datetime.now(timezone.utc).date()
-    d = dt_utc.date()
-    if d == now:
-        return "Today"
-    if (now.toordinal() - d.toordinal()) == 1:
-        return "Yesterday"
-    return dt_utc.strftime("%b %d, %Y")
-
-
 class SummaryScreen(QWidget):
     def __init__(self, on_done):
         super().__init__()
         self.on_done = on_done
-        self.store = SessionStore()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
@@ -79,8 +53,12 @@ class SummaryScreen(QWidget):
         self.avg_spo2_lbl = QLabel("Avg SpO₂: —")
 
         for lbl in (
-            self.duration_lbl, self.baseline_lbl, self.avg_lbl,
-            self.breaks_lbl, self.avg_hr_lbl, self.avg_spo2_lbl
+            self.duration_lbl,
+            self.baseline_lbl,
+            self.avg_lbl,
+            self.breaks_lbl,
+            self.avg_hr_lbl,
+            self.avg_spo2_lbl,
         ):
             lbl.setAlignment(Qt.AlignLeft)
             lbl.setStyleSheet("font-size: 16px; font-weight: 650;")
@@ -91,27 +69,6 @@ class SummaryScreen(QWidget):
         cur_layout.addWidget(self.breaks_lbl)
         cur_layout.addWidget(self.avg_hr_lbl)
         cur_layout.addWidget(self.avg_spo2_lbl)
-
-        # ---- Previous session card (optional)
-        self.prev_card = _card()
-        prev_layout = QVBoxLayout(self.prev_card)
-        prev_layout.setContentsMargins(22, 16, 22, 16)
-        prev_layout.setSpacing(6)
-
-        self.prev_title = QLabel("Previous session")
-        self.prev_title.setStyleSheet("font-size: 14px; color: rgba(231,238,247,0.75); font-weight: 650;")
-
-        self.prev_value = QLabel("—")
-        self.prev_value.setStyleSheet("font-size: 16px; font-weight: 750;")
-
-        self.prev_meta = QLabel("")
-        self.prev_meta.setStyleSheet("font-size: 13px; color: rgba(231,238,247,0.65);")
-
-        prev_layout.addWidget(self.prev_title)
-        prev_layout.addWidget(self.prev_value)
-        prev_layout.addWidget(self.prev_meta)
-
-        self.prev_card.hide()
 
         # ---- Done button
         self.done_btn = QPushButton("Done")
@@ -132,7 +89,6 @@ class SummaryScreen(QWidget):
 
         root.addWidget(title)
         root.addWidget(self.current_card)
-        root.addWidget(self.prev_card)
         root.addSpacing(8)
         root.addWidget(self.done_btn, alignment=Qt.AlignCenter)
 
@@ -150,27 +106,3 @@ class SummaryScreen(QWidget):
         self.breaks_lbl.setText(f"Breaks triggered: {breaks}")
         self.avg_hr_lbl.setText(f"Avg heart rate: {avg_hr} bpm" if avg_hr else "Avg heart rate: —")
         self.avg_spo2_lbl.setText(f"Avg SpO₂: {avg_spo2}%" if avg_spo2 else "Avg SpO₂: —")
-
-        # ---- Previous session (from disk)
-        items: List[Dict[str, Any]] = self.store.load()
-        if len(items) < 2:
-            self.prev_card.hide()
-            return
-
-        prev = items[-2]
-        p_dur = int(prev.get("duration_s", 0))
-        p_baseline = float(prev.get("baseline", 0.0))
-        p_avg = float(prev.get("avg_focus", 0.0))
-        p_breaks = int(prev.get("breaks", 0))
-        ts = str(prev.get("timestamp_utc", ""))
-
-        dt_utc = _parse_iso(ts)
-        when = _relative_day_label(dt_utc) if dt_utc else "Recent"
-
-        self.prev_value.setText(
-            f"{_format_duration(p_dur)}  •  Avg {int(p_avg * 100)}%  •  Breaks {p_breaks}"
-        )
-        self.prev_meta.setText(
-            f"{when}  •  Baseline {int(p_baseline * 100)}%"
-        )
-        self.prev_card.show()
