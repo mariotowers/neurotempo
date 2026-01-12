@@ -1,6 +1,8 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
 from PySide6.QtCore import Qt, QTimer
 
+from neurotempo.brain.focus_source import FocusSource
+
 
 class CalibrationScreen(QWidget):
     def __init__(self, seconds: int, on_done):
@@ -10,6 +12,8 @@ class CalibrationScreen(QWidget):
 
         self._elapsed = 0
         self._running = False
+        self._samples = []
+        self.focus_source = FocusSource()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
@@ -34,7 +38,6 @@ class CalibrationScreen(QWidget):
         self.progress.setFixedWidth(520)
         self.progress.setTextVisible(True)
 
-        # ✅ Force a visible bar fill (chunk), regardless of global APP_QSS
         self.progress.setStyleSheet("""
             QProgressBar {
                 border: 1px solid rgba(255,255,255,0.14);
@@ -73,12 +76,16 @@ class CalibrationScreen(QWidget):
             return
         self._running = True
         self._elapsed = 0
+        self._samples = []
         self.progress.setValue(0)
         self.status.setText("Calibrating…")
         self.timer.start()
 
     def _tick(self):
         self._elapsed += 1
+
+        # ✅ collect focus sample each second
+        self._samples.append(self.focus_source.sample_focus())
 
         pct = int((self._elapsed / self.seconds) * 100)
         pct = max(0, min(100, pct))
@@ -87,7 +94,12 @@ class CalibrationScreen(QWidget):
         if self._elapsed >= self.seconds:
             self.timer.stop()
             self._running = False
-            self.status.setText("Done. Launching session…")
 
-            baseline_focus = 0.60  # placeholder for now
-            self.on_done(baseline_focus)
+            # ✅ compute baseline (average)
+            baseline_focus = sum(self._samples) / max(1, len(self._samples))
+            baseline_focus = max(0.0, min(1.0, baseline_focus))
+
+            self.status.setText(f"Done. Baseline: {int(baseline_focus*100)}%")
+
+            # small delay so user can see baseline text
+            QTimer.singleShot(600, lambda: self.on_done(baseline_focus))
