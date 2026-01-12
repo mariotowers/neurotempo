@@ -1,17 +1,24 @@
-import time
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QProgressBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
 from PySide6.QtCore import Qt, QTimer
+
 
 class CalibrationScreen(QWidget):
     def __init__(self, seconds: int, on_done):
         super().__init__()
-        self.seconds = seconds
+        self.seconds = int(seconds)
         self.on_done = on_done
-        self.t0 = None
 
-        title = QLabel("Calibration (30 seconds)")
+        self._elapsed = 0
+        self._running = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(40, 40, 40, 40)
+        root.setSpacing(18)
+        root.setAlignment(Qt.AlignCenter)
+
+        title = QLabel(f"Calibration ({self.seconds} seconds)")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        title.setStyleSheet("font-size: 28px; font-weight: 800;")
 
         instructions = QLabel(
             "Sit still and blink three times.\n"
@@ -19,53 +26,68 @@ class CalibrationScreen(QWidget):
         )
         instructions.setAlignment(Qt.AlignCenter)
         instructions.setWordWrap(True)
+        instructions.setStyleSheet("font-size: 15px; color: rgba(231,238,247,0.75);")
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, self.seconds)
+        self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setFixedWidth(420)
+        self.progress.setFixedWidth(520)
+        self.progress.setTextVisible(True)
 
-        self.status = QLabel("Ready.")
+        # ✅ Force a visible bar fill (chunk), regardless of global APP_QSS
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid rgba(255,255,255,0.14);
+                border-radius: 10px;
+                background: rgba(255,255,255,0.06);
+                height: 20px;
+                text-align: center;
+                color: rgba(231,238,247,0.85);
+            }
+            QProgressBar::chunk {
+                background: rgba(255,255,255,0.22);
+                border-radius: 10px;
+            }
+        """)
+
+        self.status = QLabel("Starting…")
         self.status.setAlignment(Qt.AlignCenter)
+        self.status.setStyleSheet("color: rgba(231,238,247,0.75);")
 
-        self.start_btn = QPushButton("Start Calibration")
-        self.start_btn.setFixedHeight(44)
-        self.start_btn.clicked.connect(self.start)
-
-        layout = QVBoxLayout(self)
-        layout.addStretch(1)
-        layout.addWidget(title)
-        layout.addSpacing(10)
-        layout.addWidget(instructions)
-        layout.addSpacing(16)
-        layout.addWidget(self.progress, alignment=Qt.AlignCenter)
-        layout.addSpacing(10)
-        layout.addWidget(self.status)
-        layout.addSpacing(16)
-        layout.addWidget(self.start_btn, alignment=Qt.AlignCenter)
-        layout.addStretch(1)
+        root.addWidget(title)
+        root.addWidget(instructions)
+        root.addSpacing(8)
+        root.addWidget(self.progress)
+        root.addWidget(self.status)
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.tick)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._tick)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.start()
 
     def start(self):
-        self.start_btn.setEnabled(False)
-        self.t0 = time.time()
-        self.status.setText("Calibrating… stay still.")
-        self.timer.start(250)
+        if self._running:
+            return
+        self._running = True
+        self._elapsed = 0
+        self.progress.setValue(0)
+        self.status.setText("Calibrating…")
+        self.timer.start()
 
-    def tick(self):
-        elapsed = int(time.time() - self.t0)
-        self.progress.setValue(min(elapsed, self.seconds))
+    def _tick(self):
+        self._elapsed += 1
 
-        remaining = self.seconds - elapsed
-        if remaining > 0:
-            self.status.setText(f"Calibrating… {remaining}s left (blink 3 times).")
-        else:
+        pct = int((self._elapsed / self.seconds) * 100)
+        pct = max(0, min(100, pct))
+        self.progress.setValue(pct)
+
+        if self._elapsed >= self.seconds:
             self.timer.stop()
+            self._running = False
+            self.status.setText("Done. Launching session…")
 
-            # Placeholder baseline focus value (we’ll compute real baseline from EEG later)
-            baseline_focus = 0.62
-
-            self.status.setText(f"Calibration complete ✅ Baseline focus: {baseline_focus:.2f}")
-            QTimer.singleShot(700, lambda: self.on_done(baseline_focus))
+            baseline_focus = 0.60  # placeholder for now
+            self.on_done(baseline_focus)
