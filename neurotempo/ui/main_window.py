@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 from PySide6.QtCore import Qt
 
 from neurotempo.ui.splash import SplashDisclaimer
+from neurotempo.ui.presession import PreSessionScreen
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -13,18 +14,24 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
-        self.splash = SplashDisclaimer(on_continue=self.go_home)
+        self.splash = SplashDisclaimer(on_continue=self.go_presession)
+        self.presession = PreSessionScreen(on_start=self.go_home)
         self.home = self._make_home()
 
         self.stack.addWidget(self.splash)
+        self.stack.addWidget(self.presession)
         self.stack.addWidget(self.home)
+
         self.stack.setCurrentWidget(self.splash)
 
     def _make_home(self) -> QWidget:
         w = QWidget()
-        label = QLabel("Home screen (next: Pre-Session sensor check) ✅", w)
+        label = QLabel("Session screen next (calibration + live metrics) ✅", w)
         label.setAlignment(Qt.AlignCenter)
         return w
+
+    def go_presession(self):
+        self.stack.setCurrentWidget(self.presession)
 
     def go_home(self):
         self.stack.setCurrentWidget(self.home)
