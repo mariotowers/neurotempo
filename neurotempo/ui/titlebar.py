@@ -1,104 +1,102 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QToolButton
 from PySide6.QtCore import Qt, QPoint
 
 
 class TitleBar(QWidget):
-    """
-    Frameless window title bar:
-    - Drag anywhere on the bar to move the window
-    - Minimize button
-    - Maximize/Restore button (fullscreen-ish)
-    - Close button
-    """
-    def __init__(self, window, title: str = "Neurotempo"):
-        super().__init__()
+    def __init__(self, window, title: str, on_settings=None):
+        super().__init__(window)
         self._window = window
+        self._on_settings = on_settings
         self._drag_pos: QPoint | None = None
 
         self.setFixedHeight(44)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 8, 12, 8)
-        layout.setSpacing(10)
-
-        self.title = QLabel(title)
-        self.title.setStyleSheet("font-size: 14px; font-weight: 750;")
-
-        # Buttons
-        self.min_btn = self._btn("—")
-        self.max_btn = self._btn("⬜")
-        self.close_btn = self._btn("✕", danger=True)
-
-        self.min_btn.clicked.connect(self._window.showMinimized)
-        self.max_btn.clicked.connect(self._toggle_max_restore)
-        self.close_btn.clicked.connect(self._window.close)
-
-        layout.addWidget(self.title)
-        layout.addStretch(1)
-        layout.addWidget(self.min_btn)
-        layout.addWidget(self.max_btn)
-        layout.addWidget(self.close_btn)
-
-        # Slight separator line + rounded top
+        self.setObjectName("titlebar")
         self.setStyleSheet("""
-            QWidget {
+            QWidget#titlebar {
                 background: rgba(255,255,255,0.03);
-                border-bottom: 1px solid rgba(255,255,255,0.06);
-                border-top-left-radius: 16px;
-                border-top-right-radius: 16px;
+                border: 1px solid rgba(255,255,255,0.06);
+                border-radius: 14px;
+            }
+            QLabel#titleText {
+                font-size: 14px;
+                font-weight: 800;
+                letter-spacing: 0.2px;
+            }
+            QToolButton {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 10px;
+                padding: 6px 10px;
+                font-weight: 800;
+            }
+            QToolButton:hover { background: rgba(255,255,255,0.10); }
+            QToolButton:pressed { background: rgba(255,255,255,0.16); }
+            QToolButton:disabled {
+                background: rgba(255,255,255,0.03);
+                border: 1px solid rgba(255,255,255,0.06);
+                color: rgba(255,255,255,0.25);
             }
         """)
 
-    def _btn(self, text: str, danger: bool = False) -> QPushButton:
-        b = QPushButton(text)
-        b.setFixedSize(36, 30)
-        b.setCursor(Qt.PointingHandCursor)
-        if danger:
-            b.setStyleSheet("""
-                QPushButton {
-                    background: rgba(255,255,255,0.06);
-                    border: 1px solid rgba(255,255,255,0.10);
-                    border-radius: 10px;
-                    font-weight: 900;
-                }
-                QPushButton:hover { background: rgba(239,68,68,0.25); }
-                QPushButton:pressed { background: rgba(239,68,68,0.35); }
-            """)
-        else:
-            b.setStyleSheet("""
-                QPushButton {
-                    background: rgba(255,255,255,0.06);
-                    border: 1px solid rgba(255,255,255,0.10);
-                    border-radius: 10px;
-                    font-weight: 900;
-                }
-                QPushButton:hover { background: rgba(255,255,255,0.10); }
-                QPushButton:pressed { background: rgba(255,255,255,0.14); }
-            """)
-        return b
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setSpacing(8)
 
-    def _toggle_max_restore(self):
-        # Works on Windows/macOS for frameless windows
-        if self._window.isMaximized():
-            self._window.showNormal()
-        else:
-            self._window.showMaximized()
+        self.title = QLabel(title)
+        self.title.setObjectName("titleText")
+        self.title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        lay.addWidget(self.title, 1)
+
+        # ---- Settings button (always visible, enabled by MainWindow)
+        self.settings_btn = QToolButton()
+        self.settings_btn.setText("⚙︎")
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setToolTip("Settings")
+
+        if callable(self._on_settings):
+            self.settings_btn.clicked.connect(self._on_settings)
+
+        lay.addWidget(self.settings_btn)
+
+        # ---- Close button
+        self.close_btn = QToolButton()
+        self.close_btn.setText("✕")
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.clicked.connect(self._window.close)
+        lay.addWidget(self.close_btn)
+
+    # --------------------------------------------------
+    # Drag to move window
+    # --------------------------------------------------
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # store cursor pos relative to window top-left
             self._drag_pos = event.globalPosition().toPoint() - self._window.frameGeometry().topLeft()
             event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # Don't drag while maximized (feels weird). Restoring first is possible but optional.
-        if self._window.isMaximized():
-            return
-
         if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
             self._window.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
-        event.accept()
+        super().mouseReleaseEvent(event)
+
+    # --------------------------------------------------
+    # Double-click titlebar to toggle maximize
+    # --------------------------------------------------
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self._window.isMaximized():
+                self._window.showNormal()
+            else:
+                self._window.showMaximized()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)

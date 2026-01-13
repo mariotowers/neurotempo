@@ -48,9 +48,10 @@ class SessionScreen(QWidget):
         * Sustained low required
         * Cooldown after popup (no spam)
     """
-    def __init__(self, baseline_focus: float, on_end):
+    def __init__(self, baseline_focus: float, settings, on_end):
         super().__init__()
         self.baseline_focus = float(baseline_focus)
+        self.settings = settings  # ✅ snapshot of saved settings for this session
         self.on_end = on_end
 
         self.sim = SessionSimulator(self.baseline_focus)
@@ -59,15 +60,20 @@ class SessionScreen(QWidget):
         self.logger = SessionLogger()
         self.store = SessionStore()
 
-        # ---- Break policy (tuned for real EEG)
-        self.ema_alpha = 0.18              # smoothing strength
-        self.grace_s = 120                 # first 2 minutes: no break popups
-        self.low_required_s = 25           # must stay low for ~25s
-        self.cooldown_s = 8 * 60           # 8 min cooldown after popup
+        # ---- Break policy (from saved Settings)
+        self.ema_alpha = float(getattr(self.settings, "ema_alpha", 0.18))
+        self.grace_s = int(getattr(self.settings, "grace_s", 120))
+        self.low_required_s = int(getattr(self.settings, "low_required_s", 25))
+        self.cooldown_s = int(getattr(self.settings, "cooldown_s", 8 * 60))
+        self.fatigue_gate_value = float(getattr(self.settings, "fatigue_gate", 0.45))
+
+        self.threshold_multiplier = float(getattr(self.settings, "threshold_multiplier", 0.70))
+        self.threshold_min = float(getattr(self.settings, "threshold_min", 0.25))
+        self.threshold_max = float(getattr(self.settings, "threshold_max", 0.60))
 
         # derived + state
         self.focus_ema = self.baseline_focus
-        self.fatigue_ema = 0.25            # start near simulator default
+        self.fatigue_ema = 0.25  # start near simulator default
         self.low_seconds = 0
         self.last_break_ts = 0.0
         self.breaks_triggered = 0
@@ -217,14 +223,25 @@ class SessionScreen(QWidget):
         self.timer.timeout.connect(self.update_metrics)
         self.timer.start(1000)
 
+    # -----------------------
+    # Threshold logic (from Settings)
+    # -----------------------
+
     def _low_threshold(self) -> float:
-        # Adaptive threshold tied to baseline focus.
-        return max(0.25, min(0.60, self.baseline_focus * 0.70))
+        """
+        Adaptive threshold tied to baseline focus:
+          threshold = baseline * multiplier
+        clamped to [threshold_min, threshold_max]
+        """
+        raw = self.baseline_focus * float(self.threshold_multiplier)
+        return max(float(self.threshold_min), min(float(self.threshold_max), raw))
 
     def _fatigue_gate(self) -> float:
-        # Require some fatigue before interrupting (prevents early alerts).
-        # You can tune this later; 0.45 is a good first gate for real EEG use.
-        return 0.45
+        return float(self.fatigue_gate_value)
+
+    # -----------------------
+    # Loop
+    # -----------------------
 
     def update_metrics(self):
         try:
@@ -240,7 +257,7 @@ class SessionScreen(QWidget):
             self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
 
             # ---- Smooth focus + fatigue (EMA)
-            a = self.ema_alpha
+            a = float(self.ema_alpha)
             self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
             self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
 
@@ -250,10 +267,9 @@ class SessionScreen(QWidget):
             threshold = self._low_threshold()
             fatigue_gate = self._fatigue_gate()
 
-            in_grace = elapsed < self.grace_s
-            in_cooldown = (now - self.last_break_ts) < self.cooldown_s if self.last_break_ts > 0 else False
+            in_grace = elapsed < float(self.grace_s)
+            in_cooldown = (now - self.last_break_ts) < float(self.cooldown_s) if self.last_break_ts > 0 else False
 
-            # Condition: focus low AND fatigue high enough
             low_and_fatigued = (self.focus_ema < threshold) and (self.fatigue_ema >= fatigue_gate)
 
             if not in_grace and not in_cooldown:
@@ -262,7 +278,7 @@ class SessionScreen(QWidget):
                 else:
                     self.low_seconds = 0
 
-                if self.low_seconds >= self.low_required_s:
+                if self.low_seconds >= int(self.low_required_s):
                     self.low_seconds = 0
                     self.last_break_ts = now
                     self.breaks_triggered += 1
@@ -274,7 +290,7 @@ class SessionScreen(QWidget):
             else:
                 self.low_seconds = 0
 
-            # Bars (use EMA for focus bar so it looks stable)
+            # Bars (use EMA so it looks stable)
             focus_pct = int(max(0.0, min(1.0, self.focus_ema)) * 100)
             fatigue_pct = int(max(0.0, min(1.0, self.fatigue_ema)) * 100)
 
@@ -284,6 +300,7 @@ class SessionScreen(QWidget):
             self.focus_bar.setStyleSheet(
                 f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}"
             )
+            # fatigue bar: show "good" when fatigue is low
             self.fatigue_bar.setStyleSheet(
                 f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}"
             )
@@ -292,7 +309,7 @@ class SessionScreen(QWidget):
             self.hr_value.setText(f"{m.heart_rate} bpm")
             self.spo2_value.setText(f"{m.spo2} %")
 
-            # Status (based on EMA + gate)
+            # Status
             if in_grace:
                 self.state_value.setText("⚪ Settling in…")
             elif self.focus_ema >= 0.65:
@@ -308,7 +325,7 @@ class SessionScreen(QWidget):
                     else:
                         self.state_value.setText("🔴 Focus low + fatigue rising")
 
-            # Charts (raw focus/HR in charts)
+            # Charts (raw focus/HR)
             self.focus_hist.append(float(m.focus))
             self.hr_hist.append(int(m.heart_rate))
             self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
