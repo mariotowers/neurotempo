@@ -8,7 +8,8 @@ from PySide6.QtCore import Qt, QTimer
 
 from neurotempo.brain.sensor_quality import MuseSensorQuality
 
-GREEN_THRESHOLD = 0.5  # MuseSensorQuality returns 0..1
+
+GREEN_THRESHOLD = 0.5  # MuseSensorQuality returns 0.0 or 1.0
 
 
 def _card() -> QFrame:
@@ -59,8 +60,15 @@ class PreSessionScreen(QWidget):
         self.on_start = on_start
         self.brain = brain
 
-        # REAL signal quality reader
-        self.reader = MuseSensorQuality(self.brain, window_sec=2.0)
+        # ✅ FAST, immediate green, delayed red
+        self.reader = MuseSensorQuality(
+            brain=self.brain,
+            window_sec=0.75,
+            update_hz=8.0,
+            good_std=25.0,
+            bad_std=70.0,
+            bad_streak_to_red=6,
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 34, 40, 34)
@@ -101,15 +109,12 @@ class PreSessionScreen(QWidget):
 
         grid.addWidget(self.dot_af7, 0, 1, alignment=Qt.AlignCenter)
         grid.addWidget(self.dot_af8, 0, 2, alignment=Qt.AlignCenter)
-
         grid.addItem(QSpacerItem(10, 10, QSizePolicy.Minimum, QSizePolicy.Expanding), 1, 1)
-
         grid.addWidget(self.dot_tp9, 2, 0, alignment=Qt.AlignCenter)
         grid.addWidget(self.dot_tp10, 2, 3, alignment=Qt.AlignCenter)
 
         dlay.addWidget(head)
 
-        # Red-only help text area
         self.help_wrap = QFrame()
         self.help_layout = QVBoxLayout(self.help_wrap)
         self.help_layout.setContentsMargins(0, 0, 0, 0)
@@ -150,7 +155,7 @@ class PreSessionScreen(QWidget):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
-        self.timer.start(450)
+        self.timer.start(120)  # very responsive UI
         self._tick()
 
     def _clear_help(self):

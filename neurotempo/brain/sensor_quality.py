@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
+from typing import Dict, Tuple
 
 import numpy as np
 
@@ -18,80 +20,86 @@ class SensorStatus:
 
 class MuseSensorQuality:
     """
-    Real-only sensor contact estimate for Muse 2 using EEG stability.
+    REAL Muse 2 sensor contact check with Apple-level UX:
 
-    BrainFlow often does NOT expose resistance channels for Muse 2 on BLE,
-    so we infer contact from per-channel EEG standard deviation over a short window.
+    ✅ Red -> Green: IMMEDIATE (1 good read turns green)
+    ✅ Green -> Red: DELAYED (must be bad for N consecutive reads)
+    ✅ No simulation, no fake impedance.
 
-    - Not worn / floating electrodes => huge std (hundreds)
-    - Good contact => small std (single digits to ~tens)
+    How it works:
+    - Reads raw EEG for 4 channels (TP9, AF7, AF8, TP10).
+    - Uses signal standard deviation (uV-ish) as a practical "contact quality" proxy.
+    - Hysteresis + debounce keeps UX stable.
     """
 
     def __init__(
         self,
         brain,
-        window_sec: float = 2.0,
-        good_std_uV: float = 25.0,
-        bad_std_uV: float = 80.0,
+        window_sec: float = 0.75,   # short window => fast response
+        update_hz: float = 8.0,     # fast UI updates
+        good_std: float = 25.0,     # <= this => good contact (green)
+        bad_std: float = 70.0,      # >= this => clearly bad (candidate for red)
+        bad_streak_to_red: int = 6, # needs N bad reads to flip to red
     ):
         self.brain = brain
         self.window_sec = float(window_sec)
+        self.update_period = 1.0 / float(update_hz)
 
-        # thresholds (tune if needed)
-        self.good_std = float(good_std_uV)
-        self.bad_std = float(bad_std_uV)
+        self.good_std = float(good_std)
+        self.bad_std = float(bad_std)
+        self.bad_streak_to_red = int(max(1, bad_streak_to_red))
 
-    def _std_to_quality(self, std: float) -> float:
-        """
-        Map std to 0..1:
-        <= good_std => 1.0 (green)
-        >= bad_std  => 0.0 (red)
-        linear in between
-        """
-        if std <= self.good_std:
-            return 1.0
-        if std >= self.bad_std:
-            return 0.0
-        # linear interpolation
-        return float(1.0 - (std - self.good_std) / (self.bad_std - self.good_std))
+        self._last_ts = 0.0
+
+        # stable boolean states
+        self._state: Dict[str, float] = {"TP9": 0.0, "AF7": 0.0, "AF8": 0.0, "TP10": 0.0}
+        self._bad_streak: Dict[str, int] = {"TP9": 0, "AF7": 0, "AF8": 0, "TP10": 0}
 
     def read(self) -> SensorStatus:
-        """
-        Returns 0.0..1.0 per sensor. Your UI can treat >=0.5 as green.
-        """
-        if not hasattr(self.brain, "fs") or not hasattr(self.brain, "eeg_channels"):
-            raise MuseNotReady("Brain backend not initialized")
+        now = time.time()
+        if (now - self._last_ts) < self.update_period:
+            return SensorStatus(**self._state)
 
+        self._last_ts = now
+
+        # We use the underlying BrainFlowMuseBrain board directly to avoid extra APIs.
+        board = getattr(self.brain, "board", None)
         fs = int(getattr(self.brain, "fs", 256))
         eeg_channels = list(getattr(self.brain, "eeg_channels", []))
-        if not eeg_channels:
-            raise MuseNotReady("No EEG channels")
 
-        n = int(self.window_sec * fs)
+        if board is None or not eeg_channels:
+            raise MuseNotReady("Muse is not connected")
 
-        data = self.brain.get_current_eeg(n)  # FULL matrix
-        # pick EEG rows only
-        eeg = data[eeg_channels, :]  # shape: (4, n) for Muse 2 EEG sensors
+        n = int(max(32, self.window_sec * fs))
+        data = board.get_current_board_data(n)
+        if data is None or data.shape[1] < n:
+            raise MuseNotReady("Not enough EEG samples yet")
 
-        # per-channel std
-        stds = np.std(eeg, axis=1)
+        # Muse 2 4 EEG channels: BrainFlow order typically = [TP9, AF7, AF8, TP10]
+        names = ["TP9", "AF7", "AF8", "TP10"]
+        chans = eeg_channels[:4]
+        if len(chans) < 4:
+            raise MuseNotReady("Expected 4 EEG channels")
 
-        # Muse 2 channel order via BrainFlow is typically [AF7, AF8, TP9, TP10] or similar.
-        # But BrainFlow gives us eeg_channels indices; ordering in eeg[] matches that list.
-        # We'll map the 4 EEG channels to the 4 labels in a fixed order:
-        # [AF7, AF8, TP9, TP10] (this matches common Muse 2 labeling used by BrainFlow examples).
-        # If your dots look swapped, we’ll swap mapping later (no UX change).
-        if len(stds) < 4:
-            raise MuseNotReady("Not enough EEG channels for sensor check")
+        for name, ch in zip(names, chans):
+            x = np.asarray(data[ch], dtype=np.float64)
+            x = x - float(np.mean(x))
+            std = float(np.std(x))
 
-        af7_std = float(stds[0])
-        af8_std = float(stds[1])
-        tp9_std = float(stds[2])
-        tp10_std = float(stds[3])
+            # ✅ IMMEDIATE GREEN when clearly good
+            if std <= self.good_std:
+                self._state[name] = 1.0
+                self._bad_streak[name] = 0
+                continue
 
-        return SensorStatus(
-            TP9=self._std_to_quality(tp9_std),
-            AF7=self._std_to_quality(af7_std),
-            AF8=self._std_to_quality(af8_std),
-            TP10=self._std_to_quality(tp10_std),
-        )
+            # Ambiguous zone: keep last state (prevents flicker)
+            if std < self.bad_std:
+                self._bad_streak[name] = 0
+                continue
+
+            # Candidate for red (bad)
+            self._bad_streak[name] += 1
+            if self._bad_streak[name] >= self.bad_streak_to_red:
+                self._state[name] = 0.0
+
+        return SensorStatus(**self._state)
