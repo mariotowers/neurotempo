@@ -1,37 +1,47 @@
-# neurotempo/brain/brain_api.py
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional, Literal, Dict, Any
 
 
 @dataclass
 class BrainMetrics:
-    focus: float      # 0..1
-    fatigue: float    # 0..1
-    heart_rate: int   # bpm
-    spo2: int         # %
+    focus: float                # 0..1 (real; if not ready -> raise)
+    fatigue: float              # 0..1 (real; if not ready -> raise)
+    heart_rate: Optional[int]   # bpm (None if not available)
+    spo2: Optional[int]         # %   (None if not available)
+
+
+StatusLevel = Literal["disconnected", "connecting", "ready", "blocked", "error"]
 
 
 class BrainAPI(ABC):
-    """UI talks to this. Implementation can be simulator now, real Muse later."""
+    """Real brain backend. No simulation here."""
 
     @abstractmethod
     def start(self) -> None:
-        """Start streaming / init resources."""
         raise NotImplementedError
 
     @abstractmethod
     def stop(self) -> None:
-        """Stop streaming / release resources."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def status(self) -> Dict[str, Any]:
+        """
+        Must return:
+          {
+            'level': 'disconnected'|'connecting'|'ready'|'blocked'|'error',
+            'message': str,
+            'ready': bool
+          }
+        """
         raise NotImplementedError
 
     @abstractmethod
     def read_metrics(self) -> BrainMetrics:
-        """Return latest metrics snapshot for UI tick."""
+        """If not ready, should raise RuntimeError (real-only)."""
         raise NotImplementedError
 
-    # Convenience: calibration only needs focus
     def sample_focus(self) -> float:
         m = self.read_metrics()
-        v = float(m.focus)
-        return max(0.0, min(1.0, v))
