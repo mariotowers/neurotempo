@@ -2,8 +2,14 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
 from PySide6.QtCore import Qt
 
@@ -34,6 +40,7 @@ def _fmt_dur(seconds: int) -> str:
 class SessionHistoryScreen(QWidget):
     def __init__(self, on_back, on_new_session, on_open_detail):
         super().__init__()
+
         self.on_back = on_back
         self.on_new_session = on_new_session
         self.on_open_detail = on_open_detail
@@ -44,7 +51,11 @@ class SessionHistoryScreen(QWidget):
         root.setContentsMargins(28, 22, 28, 22)
         root.setSpacing(12)
 
+        # --------------------------------------------------
+        # Header
+        # --------------------------------------------------
         header = QHBoxLayout()
+
         title = QLabel("Session History")
         title.setStyleSheet("font-size: 24px; font-weight: 800;")
 
@@ -65,35 +76,63 @@ class SessionHistoryScreen(QWidget):
                     padding: 8px 12px;
                     font-weight: 650;
                 }
-                QPushButton:hover { background: rgba(255,255,255,0.14); }
+                QPushButton:hover {
+                    background: rgba(255,255,255,0.14);
+                }
             """)
 
         header.addWidget(title, 1)
         header.addWidget(back_btn)
         header.addWidget(new_btn)
 
+        root.addLayout(header)
+
+        # --------------------------------------------------
+        # Table
+        # --------------------------------------------------
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
             ["Date / Time", "Duration", "Baseline", "Avg Focus", "Breaks"]
         )
+
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setShowGrid(False)
 
-        self.table.cellDoubleClicked.connect(self._open_row)
-
+        # Header behavior
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         for i in range(1, 5):
             hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
 
-        root.addLayout(header)
+        # ---- HEADER ALIGNMENT FIX (THIS IS THE KEY PART)
+        hh.setStyleSheet("""
+            QHeaderView::section {
+                padding-left: 12px;
+                padding-right: 12px;
+                text-align: left;
+                background: rgba(255,255,255,0.02);
+                border: none;
+                font-weight: 750;
+            }
+        """)
+
+        header_item = self.table.horizontalHeaderItem(0)
+        if header_item:
+            header_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+        # Row interaction
+        self.table.cellDoubleClicked.connect(self._open_row)
+
         root.addWidget(self.table)
 
         self.refresh()
 
+    # --------------------------------------------------
+    # Lifecycle
+    # --------------------------------------------------
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
@@ -103,18 +142,24 @@ class SessionHistoryScreen(QWidget):
         self.table.setRowCount(len(self._items))
 
         for row, it in enumerate(self._items):
-            vals = [
+            values = [
                 _fmt_dt(str(it.get("timestamp_utc", ""))),
                 _fmt_dur(int(it.get("duration_s", 0))),
                 f"{int(float(it.get('baseline', 0)) * 100)}%",
                 f"{int(float(it.get('avg_focus', 0)) * 100)}%",
                 str(it.get("breaks", 0)),
             ]
-            for col, v in enumerate(vals):
-                item = QTableWidgetItem(v)
-                item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if col == 0 else Qt.AlignCenter))
+
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(
+                    Qt.AlignVCenter | (Qt.AlignLeft if col == 0 else Qt.AlignCenter)
+                )
                 self.table.setItem(row, col, item)
 
+    # --------------------------------------------------
+    # Navigation
+    # --------------------------------------------------
     def _open_row(self, row: int, col: int):
         if 0 <= row < len(self._items):
             self.on_open_detail(self._items[row])

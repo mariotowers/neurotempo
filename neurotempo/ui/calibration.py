@@ -1,7 +1,9 @@
+# neurotempo/ui/calibration.py
 import sys
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QApplication
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation
+from PySide6.QtWidgets import QGraphicsOpacityEffect
 
 from neurotempo.brain.sim_session import SessionSimulator
 
@@ -17,22 +19,31 @@ class CalibrationScreen(QWidget):
         self._samples = []
         self.sim = None
 
+        # --- Smooth progress animation state
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)  # ~60fps
+        self._anim_timer.timeout.connect(self._animate_progress)
+        self._display_value = 0.0
+        self._target_value = 0.0
+        self._ease = 0.16  # smaller = smoother / slower (0.12–0.20 feels good)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
         root.setSpacing(18)
         root.setAlignment(Qt.AlignCenter)
 
-        title = QLabel(f"Calibration ({self.seconds} seconds)")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 28px; font-weight: 800;")
+        # ✅ Keep references so we can HIDE them at completion
+        self.title = QLabel(f"Calibration ({self.seconds} seconds)")
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setStyleSheet("font-size: 28px; font-weight: 800;")
 
-        instructions = QLabel(
+        self.instructions = QLabel(
             "Sit still and blink three times.\n"
             "We will calculate your baseline focus level for today."
         )
-        instructions.setAlignment(Qt.AlignCenter)
-        instructions.setWordWrap(True)
-        instructions.setStyleSheet("font-size: 15px; color: rgba(231,238,247,0.75);")
+        self.instructions.setAlignment(Qt.AlignCenter)
+        self.instructions.setWordWrap(True)
+        self.instructions.setStyleSheet("font-size: 15px; color: rgba(231,238,247,0.75);")
 
         # ✅ Green check icon (hidden until complete)
         self.check = QLabel("✓")
@@ -44,18 +55,14 @@ class CalibrationScreen(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFixedWidth(520)
-        self.progress.setTextVisible(True)
-        self.progress.setFormat("%p%")
+        self.progress.setTextVisible(False)  # ✅ no % during calibration
 
-        # Visible progress bar fill (default in-progress style)
         self._progress_style_running = """
             QProgressBar {
                 border: 1px solid rgba(255,255,255,0.14);
                 border-radius: 10px;
                 background: rgba(255,255,255,0.06);
                 height: 20px;
-                text-align: center;
-                color: rgba(231,238,247,0.85);
             }
             QProgressBar::chunk {
                 background: rgba(255,255,255,0.22);
@@ -68,9 +75,6 @@ class CalibrationScreen(QWidget):
                 border-radius: 10px;
                 background: rgba(255,255,255,0.06);
                 height: 20px;
-                text-align: center;
-                color: #22c55e;
-                font-weight: 700;
             }
             QProgressBar::chunk {
                 background: #22c55e;
@@ -83,15 +87,15 @@ class CalibrationScreen(QWidget):
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setStyleSheet("color: rgba(231,238,247,0.75);")
 
-        root.addWidget(title)
-        root.addWidget(instructions)
+        root.addWidget(self.title)
+        root.addWidget(self.instructions)
         root.addSpacing(8)
         root.addWidget(self.check)
         root.addWidget(self.progress)
         root.addWidget(self.status)
 
         self.timer = QTimer(self)
-        self.timer.setInterval(1000)
+        self.timer.setInterval(1000)  # sample + timekeeping at 1Hz
         self.timer.timeout.connect(self._tick)
 
     def showEvent(self, event):
@@ -107,15 +111,23 @@ class CalibrationScreen(QWidget):
         self._samples = []
         self.check.hide()
 
+        # ensure intro is visible at start
+        self.title.show()
+        self.instructions.show()
+
         # Calibration reads from the SAME model as live session
         self.sim = SessionSimulator(baseline_focus=0.60)
 
+        # reset smooth animation
+        self._display_value = 0.0
+        self._target_value = 0.0
         self.progress.setValue(0)
-        self.progress.setFormat("%p%")
-        self.progress.setStyleSheet(self._progress_style_running)
 
+        self.progress.setStyleSheet(self._progress_style_running)
         self.status.setText("Calibrating…")
+
         self.timer.start()
+        self._anim_timer.start()
 
     def _play_success_feedback(self):
         # ✅ Simple cross-platform success sound (no assets needed)
@@ -132,16 +144,27 @@ class CalibrationScreen(QWidget):
         except Exception:
             pass
 
+    def _animate_progress(self):
+        # Smoothly move displayed value toward target
+        self._display_value += (self._target_value - self._display_value) * self._ease
+        v = int(max(0.0, min(100.0, self._display_value)))
+        self.progress.setValue(v)
+
+        # Stop animation timer when not running and we've reached target
+        if (not self._running) and abs(self._target_value - self._display_value) < 0.15:
+            self.progress.setValue(int(self._target_value))
+            self._anim_timer.stop()
+
     def _tick(self):
         self._elapsed += 1
 
-        # sample focus from simulator
+        # sample focus from simulator (for baseline calculation)
         m = self.sim.read()
-        self._samples.append(m.focus)
+        self._samples.append(float(m.focus))
 
-        pct = int((self._elapsed / self.seconds) * 100)
-        pct = max(0, min(100, pct))
-        self.progress.setValue(pct)
+        # update target progress (smooth animation will render it)
+        pct = (self._elapsed / max(1, self.seconds)) * 100.0
+        self._target_value = max(0.0, min(100.0, pct))
 
         # Finish
         if self._elapsed >= self.seconds:
@@ -150,25 +173,26 @@ class CalibrationScreen(QWidget):
 
             baseline_focus = sum(self._samples) / max(1, len(self._samples))
             baseline_focus = max(0.0, min(1.0, baseline_focus))
-            baseline_pct = int(baseline_focus * 100)
 
             # Make completion visually obvious
-            self.progress.setValue(100)
-            self.progress.setFormat("Complete")
+            self._target_value = 100.0
             self.progress.setStyleSheet(self._progress_style_done)
+
+            # ✅ HIDE INTRO TEXT COMPLETELY (your request)
+            self.title.hide()
+            self.instructions.hide()
 
             # ✅ Show green check + sound feedback
             self.check.show()
             self._play_success_feedback()
 
-            # Readable multi-line status + enough time to read
+            # ✅ ONLY these 2 lines (no baseline, no %)
             self.status.setText(
-                "Calibration complete\n"
-                f"Your baseline focus: {baseline_pct}%\n"
-                "Starting session…"
+                "Calibration completed\n"
+                "Starting session"
             )
             self.status.repaint()
             QApplication.processEvents()
 
-            # Give the user time to read it
-            QTimer.singleShot(4000, lambda: self.on_done(baseline_focus))
+            # Give user a moment to see it
+            QTimer.singleShot(2500, lambda: self.on_done(baseline_focus))
