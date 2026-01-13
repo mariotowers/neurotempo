@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 
 import pyqtgraph as pg
 
-from neurotempo.brain.sim_session import SessionSimulator
+from neurotempo.brain.brain_sim_session import SimSessionBrain
 from neurotempo.core.logger import SessionLogger
 from neurotempo.core.storage import SessionStore
 from neurotempo.core.break_alert import show_break_popup
@@ -54,7 +54,9 @@ class SessionScreen(QWidget):
         self.settings = settings  # ✅ snapshot of saved settings for this session
         self.on_end = on_end
 
-        self.sim = SessionSimulator(self.baseline_focus)
+        # ✅ swapped: simulator lives behind a "Brain" object
+        self.brain = SimSessionBrain(self.baseline_focus)
+        self.brain.start()
 
         # logging + storage
         self.logger = SessionLogger()
@@ -228,11 +230,6 @@ class SessionScreen(QWidget):
     # -----------------------
 
     def _low_threshold(self) -> float:
-        """
-        Adaptive threshold tied to baseline focus:
-          threshold = baseline * multiplier
-        clamped to [threshold_min, threshold_max]
-        """
         raw = self.baseline_focus * float(self.threshold_multiplier)
         return max(float(self.threshold_min), min(float(self.threshold_max), raw))
 
@@ -245,7 +242,7 @@ class SessionScreen(QWidget):
 
     def update_metrics(self):
         try:
-            m = self.sim.read()
+            m = self.brain.read_metrics()
 
             # stats
             self.samples += 1
@@ -261,7 +258,7 @@ class SessionScreen(QWidget):
             self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
             self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
 
-            # ---- Break logic (stable + non-spam + fatigue gate)
+            # ---- Break logic
             now = time.time()
             elapsed = now - self.start_ts
             threshold = self._low_threshold()
@@ -290,7 +287,7 @@ class SessionScreen(QWidget):
             else:
                 self.low_seconds = 0
 
-            # Bars (use EMA so it looks stable)
+            # Bars (EMA)
             focus_pct = int(max(0.0, min(1.0, self.focus_ema)) * 100)
             fatigue_pct = int(max(0.0, min(1.0, self.fatigue_ema)) * 100)
 
@@ -300,7 +297,6 @@ class SessionScreen(QWidget):
             self.focus_bar.setStyleSheet(
                 f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}"
             )
-            # fatigue bar: show "good" when fatigue is low
             self.fatigue_bar.setStyleSheet(
                 f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}"
             )
@@ -339,6 +335,11 @@ class SessionScreen(QWidget):
             self.timer.stop()
 
         try:
+            self.brain.stop()
+        except Exception:
+            pass
+
+        try:
             self.logger.close()
         except Exception:
             pass
@@ -369,6 +370,10 @@ class SessionScreen(QWidget):
         try:
             if self.timer.isActive():
                 self.timer.stop()
+            try:
+                self.brain.stop()
+            except Exception:
+                pass
             self.logger.close()
         finally:
             super().closeEvent(event)
