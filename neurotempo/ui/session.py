@@ -9,9 +9,9 @@ from PySide6.QtCore import Qt, QTimer
 import pyqtgraph as pg
 
 from neurotempo.brain.sim_session import SessionSimulator
-from neurotempo.core.notify import notify
 from neurotempo.core.logger import SessionLogger
 from neurotempo.core.storage import SessionStore
+from neurotempo.core.break_alert import show_break_popup
 
 
 def bar_color(value: float) -> str:
@@ -38,8 +38,9 @@ class SessionScreen(QWidget):
     """
     Live Session Screen
     - End Session button (manual)
-    - Tracks duration, avg focus, breaks triggered
-    - Logs CSV + sends notification when focus is low for ~10s
+    - Tracks duration, avg focus, breaks triggered, avg HR, avg SpO2
+    - Logs CSV
+    - Pops a center-screen break popup when focus is low for ~10s
     - Saves session summary to per-user app data (macOS + Windows)
     """
     def __init__(self, baseline_focus: float, on_end):
@@ -49,31 +50,29 @@ class SessionScreen(QWidget):
 
         self.sim = SessionSimulator(self.baseline_focus)
 
-        # Logging + notification state
+        # logging + storage
         self.logger = SessionLogger()
         self.store = SessionStore()
 
-        # Debug (optional)
-        print(f"[Neurotempo] Sessions saved to: {self.store.path}")
-
+        # break detection state
         self.low_focus_streak = 0
         self.notified_break = False
         self.breaks_triggered = 0
 
-        # Stats
+        # stats
         self.start_ts = time.time()
         self.samples = 0
         self.focus_sum = 0.0
         self.hr_sum = 0
         self.spo2_sum = 0
 
-        # History buffers (60 points)
+        # history buffers (60 points)
         self.max_points = 60
         self.focus_hist = deque([self.baseline_focus] * self.max_points, maxlen=self.max_points)
         self.hr_hist = deque([72] * self.max_points, maxlen=self.max_points)
         self.x_hist = deque(range(-self.max_points + 1, 1), maxlen=self.max_points)
 
-        # Header row: title + end button
+        # --- Header
         header = QHBoxLayout()
         header.setSpacing(12)
 
@@ -103,7 +102,7 @@ class SessionScreen(QWidget):
         subtitle.setObjectName("muted")
         subtitle.setAlignment(Qt.AlignLeft)
 
-        # Bars card
+        # --- Bars card
         bars_card = card()
         bars_layout = QVBoxLayout(bars_card)
         bars_layout.setContentsMargins(16, 14, 16, 14)
@@ -120,7 +119,7 @@ class SessionScreen(QWidget):
         bars_layout.addWidget(self.focus_bar)
         bars_layout.addWidget(self.fatigue_bar)
 
-        # Vitals row
+        # --- Vitals row
         vitals_row = QHBoxLayout()
         vitals_row.setSpacing(12)
 
@@ -160,7 +159,7 @@ class SessionScreen(QWidget):
         vitals_row.addWidget(self.spo2_card)
         vitals_row.addWidget(self.state_card)
 
-        # Charts
+        # --- Charts
         charts_card = card()
         charts_layout = QVBoxLayout(charts_card)
         charts_layout.setContentsMargins(12, 12, 12, 12)
@@ -188,7 +187,7 @@ class SessionScreen(QWidget):
         charts_layout.addWidget(self.focus_plot)
         charts_layout.addWidget(self.hr_plot)
 
-        # Page layout
+        # --- Page layout
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 20, 22, 20)
         root.setSpacing(12)
@@ -200,67 +199,72 @@ class SessionScreen(QWidget):
         root.addLayout(vitals_row)
         root.addWidget(charts_card)
 
-        # Timer tick
+        # --- Timer tick
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_metrics)
         self.timer.start(1000)
 
     def update_metrics(self):
-        m = self.sim.read()
+        try:
+            m = self.sim.read()
 
-        # stats
-        self.samples += 1
-        self.focus_sum += m.focus
-        self.hr_sum += int(m.heart_rate)
-        self.spo2_sum += int(m.spo2)
+            # stats
+            self.samples += 1
+            self.focus_sum += float(m.focus)
+            self.hr_sum += int(m.heart_rate)
+            self.spo2_sum += int(m.spo2)
 
-        # logging
-        self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
+            # logging
+            self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
 
-        # Low-focus detection (~10 seconds)
-        if m.focus < 0.40:
-            self.low_focus_streak += 1
-        else:
-            self.low_focus_streak = 0
-            self.notified_break = False
+            # Low-focus detection (~10 seconds)
+            if m.focus < 0.40:
+                self.low_focus_streak += 1
+            else:
+                self.low_focus_streak = 0
+                self.notified_break = False
 
-        if self.low_focus_streak >= 10 and not self.notified_break:
-            notify("Neurotempo", "Focus is low. Take a 2–5 minute reset break.")
-            self.notified_break = True
-            self.breaks_triggered += 1
+            if self.low_focus_streak >= 10 and not self.notified_break:
+                # set flags first (prevents re-entrancy issues)
+                self.notified_break = True
+                self.breaks_triggered += 1
 
-        # Bars
-        focus_pct = int(m.focus * 100)
-        fatigue_pct = int(m.fatigue * 100)
+                show_break_popup("Neurotempo", "Focus is low. Take a 2–5 minute reset break.")
 
-        self.focus_bar.setValue(focus_pct)
-        self.fatigue_bar.setValue(fatigue_pct)
+            # Bars
+            focus_pct = int(m.focus * 100)
+            fatigue_pct = int(m.fatigue * 100)
 
-        self.focus_bar.setStyleSheet(
-            f"QProgressBar::chunk {{ background: {bar_color(m.focus)}; }}"
-        )
-        self.fatigue_bar.setStyleSheet(
-            f"QProgressBar::chunk {{ background: {bar_color(1.0 - m.fatigue)}; }}"
-        )
+            self.focus_bar.setValue(focus_pct)
+            self.fatigue_bar.setValue(fatigue_pct)
 
-        # Vitals
-        self.hr_value.setText(f"{m.heart_rate} bpm")
-        self.spo2_value.setText(f"{m.spo2} %")
+            self.focus_bar.setStyleSheet(
+                f"QProgressBar::chunk {{ background: {bar_color(m.focus)}; }}"
+            )
+            self.fatigue_bar.setStyleSheet(
+                f"QProgressBar::chunk {{ background: {bar_color(1.0 - m.fatigue)}; }}"
+            )
 
-        # Status
-        if m.focus >= 0.65:
-            status = "🟢 Keep working"
-        elif m.focus >= 0.45:
-            status = "🟡 Take a breath"
-        else:
-            status = "🔴 Break triggered"
-        self.state_value.setText(status)
+            # Vitals
+            self.hr_value.setText(f"{m.heart_rate} bpm")
+            self.spo2_value.setText(f"{m.spo2} %")
 
-        # Charts
-        self.focus_hist.append(m.focus)
-        self.hr_hist.append(m.heart_rate)
-        self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
-        self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
+            # Status
+            if m.focus >= 0.65:
+                self.state_value.setText("🟢 Keep working")
+            elif m.focus >= 0.45:
+                self.state_value.setText("🟡 Take a breath")
+            else:
+                self.state_value.setText("🔴 Break triggered")
+
+            # Charts
+            self.focus_hist.append(m.focus)
+            self.hr_hist.append(m.heart_rate)
+            self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
+            self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
+
+        except Exception as e:
+            print("[Neurotempo] Session update error:", repr(e))
 
     def end_session(self):
         if self.timer.isActive():
