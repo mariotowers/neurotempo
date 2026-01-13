@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QTimer
 from neurotempo.brain.sensor_quality import MuseSensorQuality
 
 
-RED_THRESHOLD = 0.40  # <0.40 = no contact (red)
+GREEN_THRESHOLD = 0.5  # MuseSensorQuality returns 0.0 or 1.0
 
 
 def _card() -> QFrame:
@@ -44,6 +44,7 @@ class SensorDot(QLabel):
 
 
 def sensor_tip_for(sensor: str) -> str:
+    # ✅ KEEP ORIGINAL MESSAGES
     tips = {
         "TP9":  "TP9 (left ear) has no contact. Move hair away and adjust it so it rests directly on skin.",
         "TP10": "TP10 (right ear) has no contact. Clear any hair and gently reposition it against your ear.",
@@ -164,23 +165,26 @@ class PreSessionScreen(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _set_all_red(self):
+        self.dot_tp9.set_state(False)
+        self.dot_af7.set_state(False)
+        self.dot_af8.set_state(False)
+        self.dot_tp10.set_state(False)
+
     def _tick(self):
         try:
             st = self.reader.read()
             self.conn_status.setText("")
         except Exception as e:
             # Muse not connected / not enough samples / etc
-            self.dot_tp9.set_state(False)
-            self.dot_af7.set_state(False)
-            self.dot_af8.set_state(False)
-            self.dot_tp10.set_state(False)
-
+            self._set_all_red()
             self._clear_help()
             self.conn_status.setText(
-                "Muse not ready. Turn it on, wear it, and close other Muse apps.\n"
-                f"({e})"
+                "Muse not ready. Turn it on, wear it, and close other Muse apps."
             )
             self.start_btn.setEnabled(False)
+            # Keep details in console for dev
+            print("[Neurotempo] PreSession sensor check error:", repr(e))
             return
 
         sensors = {
@@ -190,16 +194,16 @@ class PreSessionScreen(QWidget):
             "TP10": st.TP10,
         }
 
-        self.dot_tp9.set_state(sensors["TP9"] >= RED_THRESHOLD)
-        self.dot_af7.set_state(sensors["AF7"] >= RED_THRESHOLD)
-        self.dot_af8.set_state(sensors["AF8"] >= RED_THRESHOLD)
-        self.dot_tp10.set_state(sensors["TP10"] >= RED_THRESHOLD)
+        self.dot_tp9.set_state(sensors["TP9"] >= GREEN_THRESHOLD)
+        self.dot_af7.set_state(sensors["AF7"] >= GREEN_THRESHOLD)
+        self.dot_af8.set_state(sensors["AF8"] >= GREEN_THRESHOLD)
+        self.dot_tp10.set_state(sensors["TP10"] >= GREEN_THRESHOLD)
 
-        red = [k for k, v in sensors.items() if v < RED_THRESHOLD]
+        red = [k for k, v in sensors.items() if v < GREEN_THRESHOLD]
 
         self._clear_help()
         for key in red:
-            lbl = QLabel(sensor_tip_for(key))
+            lbl = QLabel(sensor_tip_for(key))  # ✅ original messages
             lbl.setWordWrap(True)
             lbl.setStyleSheet("font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;")
             self.help_layout.addWidget(lbl)

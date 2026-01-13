@@ -69,10 +69,19 @@ class SessionScreen(QWidget):
         self.start_ts = time.time()
         self.samples = 0
         self.focus_sum = 0.0
+
         self.hr_sum = 0
         self.spo2_sum = 0
         self.hr_samples = 0
         self.spo2_samples = 0
+
+        # last-known vitals (so we never log fake zeros)
+        self._last_hr = None
+        self._last_spo2 = None
+
+        # warm-up (skip first couple reads)
+        self._warmup_skip = 2
+        self._warmup_seen = 0
 
         # history buffers (60 points)
         self.max_points = 60
@@ -223,19 +232,29 @@ class SessionScreen(QWidget):
         try:
             m = self.brain.read_metrics()
 
+            # warm-up skip (avoid early weirdness)
+            self._warmup_seen += 1
+            if self._warmup_seen <= self._warmup_skip:
+                return
+
             # stats
             self.samples += 1
             self.focus_sum += float(m.focus)
 
             if m.heart_rate is not None:
+                self._last_hr = int(m.heart_rate)
                 self.hr_sum += int(m.heart_rate)
                 self.hr_samples += 1
+
             if m.spo2 is not None:
+                self._last_spo2 = int(m.spo2)
                 self.spo2_sum += int(m.spo2)
                 self.spo2_samples += 1
 
-            # logging (your logger expects ints; keep safe)
-            self.logger.log(m.focus, m.fatigue, m.heart_rate or 0, m.spo2 or 0)
+            # logging (never inject fake 0s)
+            log_hr = self._last_hr if self._last_hr is not None else 0
+            log_spo2 = self._last_spo2 if self._last_spo2 is not None else 0
+            self.logger.log(m.focus, m.fatigue, log_hr, log_spo2)
 
             # EMA
             a = float(self.ema_alpha)
@@ -278,9 +297,9 @@ class SessionScreen(QWidget):
             self.focus_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}")
             self.fatigue_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}")
 
-            # Vitals (real-only)
-            self.hr_value.setText(f"{m.heart_rate} bpm" if m.heart_rate is not None else "— bpm")
-            self.spo2_value.setText(f"{m.spo2} %" if m.spo2 is not None else "— %")
+            # Vitals (keep original UI behavior, but safe for None)
+            self.hr_value.setText(f"{self._last_hr} bpm" if self._last_hr is not None else "— bpm")
+            self.spo2_value.setText(f"{self._last_spo2} %" if self._last_spo2 is not None else "— %")
 
             # Status
             if in_grace:
@@ -293,18 +312,24 @@ class SessionScreen(QWidget):
                 if in_cooldown:
                     self.state_value.setText("🟠 Recovering (cooldown)")
                 else:
-                    self.state_value.setText("🔴 Focus low + fatigue rising" if self.fatigue_ema >= fatigue_gate else "🔵 Low focus (not fatigued)")
+                    self.state_value.setText(
+                        "🔴 Focus low + fatigue rising"
+                        if self.fatigue_ema >= fatigue_gate
+                        else "🔵 Low focus (not fatigued)"
+                    )
 
             # Charts
             self.focus_hist.append(float(m.focus))
             self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
 
-            if m.heart_rate is not None:
-                self.hr_hist.append(int(m.heart_rate))
+            # HR chart: keep last-known value (no fake drops)
+            if self._last_hr is not None:
+                self.hr_hist.append(int(self._last_hr))
             self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
         except MuseNotReady as e:
-            self.state_value.setText(f"🔴 Muse not ready: {e}")
+            self.state_value.setText("🔴 Muse not ready")
+            print("[Neurotempo] MuseNotReady in session:", repr(e))
         except Exception as e:
             print("[Neurotempo] Session update error:", repr(e))
 

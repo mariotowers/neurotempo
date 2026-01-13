@@ -18,6 +18,10 @@ class CalibrationScreen(QWidget):
         self._running = False
         self._samples = []
 
+        # ignore a few initial samples to avoid "first seconds" instability
+        self._warmup_samples_to_skip = 2
+        self._warmup_seen = 0
+
         # --- Smooth progress animation state
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(16)  # ~60fps
@@ -107,6 +111,7 @@ class CalibrationScreen(QWidget):
         self._running = True
         self._elapsed = 0
         self._samples = []
+        self._warmup_seen = 0
         self.check.hide()
 
         # ensure intro is visible at start
@@ -139,37 +144,39 @@ class CalibrationScreen(QWidget):
             pass
 
     def _animate_progress(self):
-        # Smoothly move displayed value toward target
         self._display_value += (self._target_value - self._display_value) * self._ease
         v = int(max(0.0, min(100.0, self._display_value)))
         self.progress.setValue(v)
 
-        # Stop animation timer when not running and we've reached target
         if (not self._running) and abs(self._target_value - self._display_value) < 0.15:
             self.progress.setValue(int(self._target_value))
             self._anim_timer.stop()
+
+    def _stop_with_message(self, msg: str, err: Exception | None = None):
+        self._running = False
+        if self.timer.isActive():
+            self.timer.stop()
+        if self._anim_timer.isActive():
+            self._anim_timer.stop()
+        self.status.setText(msg)
+        if err is not None:
+            print("[Neurotempo] Calibration error:", repr(err))
 
     def _tick(self):
         # sample REAL focus for baseline calculation
         try:
             f = float(self.brain.sample_focus())
         except MuseNotReady as e:
-            self._running = False
-            self.timer.stop()
-            self._anim_timer.stop()
-            self.status.setText(
-                "Muse not ready.\n"
-                f"{e}"
-            )
+            self._stop_with_message("Muse not ready.\nTurn it on and wear it.", e)
             return
         except Exception as e:
-            self._running = False
-            self.timer.stop()
-            self._anim_timer.stop()
-            self.status.setText(
-                "EEG error.\n"
-                f"{e}"
-            )
+            self._stop_with_message("EEG error.\nRetry.", e)
+            return
+
+        # warm-up skip
+        self._warmup_seen += 1
+        if self._warmup_seen <= self._warmup_samples_to_skip:
+            # do not advance elapsed or progress for skipped samples
             return
 
         self._elapsed += 1
@@ -178,7 +185,6 @@ class CalibrationScreen(QWidget):
         pct = (self._elapsed / max(1, self.seconds)) * 100.0
         self._target_value = max(0.0, min(100.0, pct))
 
-        # Finish
         if self._elapsed >= self.seconds:
             self.timer.stop()
             self._running = False
@@ -186,19 +192,15 @@ class CalibrationScreen(QWidget):
             baseline_focus = sum(self._samples) / max(1, len(self._samples))
             baseline_focus = max(0.0, min(1.0, baseline_focus))
 
-            # Make completion visually obvious
             self._target_value = 100.0
             self.progress.setStyleSheet(self._progress_style_done)
 
-            # Hide intro text
             self.title.hide()
             self.instructions.hide()
 
-            # Show green check + sound feedback
             self.check.show()
             self._play_success_feedback()
 
-            # Only these 2 lines
             self.status.setText(
                 "Calibration completed\n"
                 "Starting session"
@@ -206,7 +208,6 @@ class CalibrationScreen(QWidget):
             self.status.repaint()
             QApplication.processEvents()
 
-            # small delay so user sees completion
             QTimer.singleShot(1200, lambda: self.on_done(baseline_focus))
 
     def closeEvent(self, event):
