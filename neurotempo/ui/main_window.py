@@ -1,3 +1,5 @@
+# neurotempo/ui/main_window.py
+
 import sys
 
 from PySide6.QtWidgets import (
@@ -7,6 +9,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QGraphicsDropShadowEffect,
+    QLabel,
+    QPushButton,
 )
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPainterPath, QRegion, QGuiApplication
@@ -18,10 +22,62 @@ from neurotempo.ui.presession import PreSessionScreen
 from neurotempo.ui.calibration import CalibrationScreen
 from neurotempo.ui.session import SessionScreen
 from neurotempo.ui.settings import SettingsScreen
-
 from neurotempo.ui.summary import SummaryScreen
 from neurotempo.ui.history import SessionHistoryScreen
 from neurotempo.ui.session_detail import SessionDetailScreen
+
+from neurotempo.brain.brainflow_muse import BrainFlowMuseBrain, MuseNotReady
+
+
+class MuseBlockerScreen(QWidget):
+    """
+    Shown when Muse is not ready/connected.
+    Keeps the app flow clean without simulations.
+    """
+    def __init__(self, on_retry):
+        super().__init__()
+        self.on_retry = on_retry
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(40, 40, 40, 40)
+        root.setSpacing(14)
+        root.setAlignment(Qt.AlignCenter)
+
+        self.title = QLabel("Muse not ready")
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setStyleSheet("font-size: 24px; font-weight: 900;")
+
+        self.msg = QLabel(
+            "Turn Muse on and wear it.\n"
+            "Close any other Muse apps, then retry."
+        )
+        self.msg.setAlignment(Qt.AlignCenter)
+        self.msg.setWordWrap(True)
+        self.msg.setStyleSheet("color: rgba(231,238,247,0.78); font-size: 14px;")
+
+        self.retry = QPushButton("Retry connection")
+        self.retry.setCursor(Qt.PointingHandCursor)
+        self.retry.clicked.connect(self.on_retry)
+        self.retry.setStyleSheet("""
+            QPushButton {
+                background: rgba(34,197,94,0.14);
+                border: 1px solid rgba(34,197,94,0.28);
+                border-radius: 14px;
+                padding: 12px 16px;
+                font-weight: 850;
+                min-width: 220px;
+            }
+            QPushButton:hover { background: rgba(34,197,94,0.20); }
+            QPushButton:pressed { background: rgba(34,197,94,0.26); }
+        """)
+
+        root.addWidget(self.title)
+        root.addWidget(self.msg)
+        root.addSpacing(8)
+        root.addWidget(self.retry)
+
+    def set_message(self, text: str):
+        self.msg.setText(text)
 
 
 class MainWindow(QMainWindow):
@@ -91,10 +147,27 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.container)
         self.setCentralWidget(outer)
 
+        # ---- SINGLE REAL Muse backend owned by MainWindow
+        # device_id=None => auto discovery (works with any Muse)
+        # If you want to lock: device_id="7159EEF5-52BA-D787-7F30-636806BD9424"
+        self.brain = BrainFlowMuseBrain(
+            device_id=None,
+            timeout_s=15.0,
+            window_sec=2.0,
+            enable_logs=False
+        )
+
         # ---- Screens
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
-        self.presession = PreSessionScreen(on_start=self.go_calibration)
-        self.calibration = CalibrationScreen(seconds=30, on_done=self.go_session)
+
+        # PreSession needs brain now (REAL sensor check)
+        self.presession = PreSessionScreen(brain=self.brain, on_start=self.go_calibration)
+
+        # Muse blocker (retry)
+        self.muse_blocker = MuseBlockerScreen(on_retry=self.go_presession)
+
+        # Calibration needs brain now (REAL baseline)
+        self.calibration = CalibrationScreen(seconds=30, brain=self.brain, on_done=self.go_session)
 
         self._prev_screen = None
         self.settings = SettingsScreen(on_back=self.go_back_from_settings)
@@ -116,6 +189,7 @@ class MainWindow(QMainWindow):
 
         # ---- Stack order
         self.stack.addWidget(self.splash)
+        self.stack.addWidget(self.muse_blocker)
         self.stack.addWidget(self.presession)
         self.stack.addWidget(self.calibration)
         self.stack.addWidget(self.settings)
@@ -142,6 +216,35 @@ class MainWindow(QMainWindow):
         btn.setToolTip("" if enabled else "Settings are locked once a session begins.")
 
     # --------------------------------------------------
+    # Muse connection gate (REAL-only)
+    # --------------------------------------------------
+
+    def _ensure_muse_connected(self) -> bool:
+        """
+        Returns True if Muse is connected and streaming.
+        If not, shows blocker screen and returns False.
+        """
+        try:
+            self.brain.start()
+            return True
+        except MuseNotReady as e:
+            self.muse_blocker.set_message(
+                "Muse not ready.\n\n"
+                f"{e}\n\n"
+                "Turn Muse on, wear it, close other Muse apps, then retry."
+            )
+            self.stack.setCurrentWidget(self.muse_blocker)
+            return False
+        except Exception as e:
+            self.muse_blocker.set_message(
+                "Muse connection error.\n\n"
+                f"{e}\n\n"
+                "Retry."
+            )
+            self.stack.setCurrentWidget(self.muse_blocker)
+            return False
+
+    # --------------------------------------------------
     # Navigation
     # --------------------------------------------------
 
@@ -151,10 +254,20 @@ class MainWindow(QMainWindow):
 
     def go_presession(self, _summary=None):
         self._set_settings_enabled(False)
+
+        # Gate presession so the sensor dots are real
+        if not self._ensure_muse_connected():
+            return
+
         self.stack.setCurrentWidget(self.presession)
 
     def go_calibration(self):
         self._set_settings_enabled(False)
+
+        # Gate calibration as well (in case user navigated fast)
+        if not self._ensure_muse_connected():
+            return
+
         self.stack.setCurrentWidget(self.calibration)
 
     def go_session(self, baseline_focus: float):
@@ -169,6 +282,7 @@ class MainWindow(QMainWindow):
 
         self.session = SessionScreen(
             baseline_focus=baseline_focus,
+            brain=self.brain,
             settings=settings_snapshot,
             on_end=self.go_summary
         )
@@ -241,6 +355,14 @@ class MainWindow(QMainWindow):
             self.close()
             return
         super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        # Ensure BrainFlow session releases cleanly on exit
+        try:
+            self.brain.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 def launch_app():

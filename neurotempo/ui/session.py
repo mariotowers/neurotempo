@@ -1,5 +1,4 @@
 # neurotempo/ui/session.py
-
 import time
 from collections import deque
 
@@ -10,7 +9,7 @@ from PySide6.QtCore import Qt, QTimer
 
 import pyqtgraph as pg
 
-from neurotempo.brain.brain_sim_session import SimSessionBrain
+from neurotempo.brain.brainflow_muse import MuseNotReady
 from neurotempo.core.logger import SessionLogger
 from neurotempo.core.storage import SessionStore
 from neurotempo.core.break_alert import show_break_popup
@@ -18,10 +17,10 @@ from neurotempo.core.break_alert import show_break_popup
 
 def bar_color(value: float) -> str:
     if value >= 0.65:
-        return "#22c55e"   # green
+        return "#22c55e"
     if value >= 0.45:
-        return "#facc15"   # yellow
-    return "#ef4444"       # red
+        return "#facc15"
+    return "#ef4444"
 
 
 def card() -> QFrame:
@@ -37,28 +36,12 @@ def card() -> QFrame:
 
 
 class SessionScreen(QWidget):
-    """
-    Live Session Screen
-    - End Session button (manual)
-    - Tracks duration, avg focus, breaks triggered, avg HR, avg SpO2
-    - Logs CSV
-    - Break popup logic (EEG-friendly):
-        * EMA smoothing (focus + fatigue)
-        * Adaptive focus threshold from baseline
-        * Fatigue gate (prevents early/false breaks)
-        * Grace period (no alerts at start)
-        * Sustained low required
-        * Cooldown after popup (no spam)
-    """
-    def __init__(self, baseline_focus: float, settings, on_end):
+    def __init__(self, baseline_focus: float, brain, settings, on_end):
         super().__init__()
         self.baseline_focus = float(baseline_focus)
-        self.settings = settings  # ✅ snapshot of saved settings for this session
+        self.brain = brain
+        self.settings = settings
         self.on_end = on_end
-
-        # ✅ swapped: simulator lives behind a "Brain" object
-        self.brain = SimSessionBrain(self.baseline_focus)
-        self.brain.start()
 
         # logging + storage
         self.logger = SessionLogger()
@@ -77,7 +60,7 @@ class SessionScreen(QWidget):
 
         # derived + state
         self.focus_ema = self.baseline_focus
-        self.fatigue_ema = 0.25  # start near simulator default
+        self.fatigue_ema = 0.25
         self.low_seconds = 0
         self.last_break_ts = 0.0
         self.breaks_triggered = 0
@@ -88,6 +71,8 @@ class SessionScreen(QWidget):
         self.focus_sum = 0.0
         self.hr_sum = 0
         self.spo2_sum = 0
+        self.hr_samples = 0
+        self.spo2_samples = 0
 
         # history buffers (60 points)
         self.max_points = 60
@@ -121,7 +106,7 @@ class SessionScreen(QWidget):
         header.addWidget(title, 1)
         header.addWidget(self.end_btn, 0, Qt.AlignRight)
 
-        subtitle = QLabel("Adaptive focus + fatigue feedback (simulated).")
+        subtitle = QLabel("Adaptive focus + fatigue feedback (Muse EEG).")
         subtitle.setObjectName("muted")
         subtitle.setAlignment(Qt.AlignLeft)
 
@@ -152,17 +137,17 @@ class SessionScreen(QWidget):
 
         self.hr_title = QLabel("Heart Rate")
         self.hr_title.setObjectName("muted")
-        self.hr_value = QLabel("-- bpm")
+        self.hr_value = QLabel("— bpm")
         self.hr_value.setStyleSheet("font-size: 22px; font-weight: 750;")
 
         self.spo2_title = QLabel("SpO₂")
         self.spo2_title.setObjectName("muted")
-        self.spo2_value = QLabel("-- %")
+        self.spo2_value = QLabel("— %")
         self.spo2_value.setStyleSheet("font-size: 22px; font-weight: 750;")
 
         self.state_title = QLabel("Status")
         self.state_title.setObjectName("muted")
-        self.state_value = QLabel("—")
+        self.state_value = QLabel("🟢 Muse connected")
         self.state_value.setStyleSheet("font-size: 16px; font-weight: 750;")
 
         def fill_card(frame: QFrame, t: QLabel, v: QLabel):
@@ -227,20 +212,12 @@ class SessionScreen(QWidget):
         self.timer.timeout.connect(self.update_metrics)
         self.timer.start(1000)
 
-    # -----------------------
-    # Threshold logic (from Settings)
-    # -----------------------
-
     def _low_threshold(self) -> float:
         raw = self.baseline_focus * float(self.threshold_multiplier)
         return max(float(self.threshold_min), min(float(self.threshold_max), raw))
 
     def _fatigue_gate(self) -> float:
         return float(self.fatigue_gate_value)
-
-    # -----------------------
-    # Loop
-    # -----------------------
 
     def update_metrics(self):
         try:
@@ -249,18 +226,23 @@ class SessionScreen(QWidget):
             # stats
             self.samples += 1
             self.focus_sum += float(m.focus)
-            self.hr_sum += int(m.heart_rate)
-            self.spo2_sum += int(m.spo2)
 
-            # logging
-            self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
+            if m.heart_rate is not None:
+                self.hr_sum += int(m.heart_rate)
+                self.hr_samples += 1
+            if m.spo2 is not None:
+                self.spo2_sum += int(m.spo2)
+                self.spo2_samples += 1
 
-            # ---- Smooth focus + fatigue (EMA)
+            # logging (your logger expects ints; keep safe)
+            self.logger.log(m.focus, m.fatigue, m.heart_rate or 0, m.spo2 or 0)
+
+            # EMA
             a = float(self.ema_alpha)
             self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
             self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
 
-            # ---- Break logic
+            # Break logic
             now = time.time()
             elapsed = now - self.start_ts
             threshold = self._low_threshold()
@@ -272,10 +254,7 @@ class SessionScreen(QWidget):
             low_and_fatigued = (self.focus_ema < threshold) and (self.fatigue_ema >= fatigue_gate)
 
             if not in_grace and not in_cooldown:
-                if low_and_fatigued:
-                    self.low_seconds += 1
-                else:
-                    self.low_seconds = 0
+                self.low_seconds = self.low_seconds + 1 if low_and_fatigued else 0
 
                 if self.low_seconds >= int(self.low_required_s):
                     self.low_seconds = 0
@@ -289,23 +268,19 @@ class SessionScreen(QWidget):
             else:
                 self.low_seconds = 0
 
-            # Bars (EMA)
+            # Bars
             focus_pct = int(max(0.0, min(1.0, self.focus_ema)) * 100)
             fatigue_pct = int(max(0.0, min(1.0, self.fatigue_ema)) * 100)
 
             self.focus_bar.setValue(focus_pct)
             self.fatigue_bar.setValue(fatigue_pct)
 
-            self.focus_bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}"
-            )
-            self.fatigue_bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}"
-            )
+            self.focus_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}")
+            self.fatigue_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}")
 
-            # Vitals
-            self.hr_value.setText(f"{m.heart_rate} bpm")
-            self.spo2_value.setText(f"{m.spo2} %")
+            # Vitals (real-only)
+            self.hr_value.setText(f"{m.heart_rate} bpm" if m.heart_rate is not None else "— bpm")
+            self.spo2_value.setText(f"{m.spo2} %" if m.spo2 is not None else "— %")
 
             # Status
             if in_grace:
@@ -318,28 +293,24 @@ class SessionScreen(QWidget):
                 if in_cooldown:
                     self.state_value.setText("🟠 Recovering (cooldown)")
                 else:
-                    if self.fatigue_ema < fatigue_gate:
-                        self.state_value.setText("🔵 Low focus (but not fatigued)")
-                    else:
-                        self.state_value.setText("🔴 Focus low + fatigue rising")
+                    self.state_value.setText("🔴 Focus low + fatigue rising" if self.fatigue_ema >= fatigue_gate else "🔵 Low focus (not fatigued)")
 
-            # Charts (raw focus/HR)
+            # Charts
             self.focus_hist.append(float(m.focus))
-            self.hr_hist.append(int(m.heart_rate))
             self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
+
+            if m.heart_rate is not None:
+                self.hr_hist.append(int(m.heart_rate))
             self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
+        except MuseNotReady as e:
+            self.state_value.setText(f"🔴 Muse not ready: {e}")
         except Exception as e:
             print("[Neurotempo] Session update error:", repr(e))
 
     def end_session(self):
         if self.timer.isActive():
             self.timer.stop()
-
-        try:
-            self.brain.stop()
-        except Exception:
-            pass
 
         try:
             self.logger.close()
@@ -349,8 +320,8 @@ class SessionScreen(QWidget):
         duration_s = int(time.time() - self.start_ts)
 
         avg_focus = (self.focus_sum / self.samples) if self.samples > 0 else self.baseline_focus
-        avg_hr = int(round(self.hr_sum / self.samples)) if self.samples > 0 else 0
-        avg_spo2 = int(round(self.spo2_sum / self.samples)) if self.samples > 0 else 0
+        avg_hr = int(round(self.hr_sum / self.hr_samples)) if self.hr_samples > 0 else 0
+        avg_spo2 = int(round(self.spo2_sum / self.spo2_samples)) if self.spo2_samples > 0 else 0
 
         summary = {
             "duration_s": duration_s,
@@ -372,10 +343,6 @@ class SessionScreen(QWidget):
         try:
             if self.timer.isActive():
                 self.timer.stop()
-            try:
-                self.brain.stop()
-            except Exception:
-                pass
             self.logger.close()
         finally:
             super().closeEvent(event)

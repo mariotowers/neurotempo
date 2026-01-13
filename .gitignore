@@ -8,7 +8,7 @@ dist/
 build/
 
 # Virtual environment
-.venv/
+.venv312/
 
 # OS
 .DS_Store
@@ -17,3 +17,5 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.venv312/bin/activate
+.venv312/bin/Activate.ps1

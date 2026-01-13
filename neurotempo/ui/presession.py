@@ -1,10 +1,12 @@
+# neurotempo/ui/presession.py
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QFrame,
-    QHBoxLayout, QGridLayout, QSpacerItem, QSizePolicy
+    QGridLayout, QSpacerItem, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer
 
-from neurotempo.brain.muse.muse_simulator import MuseSimulator
+from neurotempo.brain.sensor_quality import MuseSensorQuality
 
 
 RED_THRESHOLD = 0.40  # <0.40 = no contact (red)
@@ -52,10 +54,13 @@ def sensor_tip_for(sensor: str) -> str:
 
 
 class PreSessionScreen(QWidget):
-    def __init__(self, on_start):
+    def __init__(self, brain, on_start):
         super().__init__()
         self.on_start = on_start
-        self.reader = MuseSimulator()
+        self.brain = brain
+
+        # REAL signal quality reader (derived from live EEG)
+        self.reader = MuseSensorQuality(self.brain, window_sec=2.0)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 34, 40, 34)
@@ -96,14 +101,11 @@ class PreSessionScreen(QWidget):
         self.dot_tp9 = SensorDot("TP9")
         self.dot_tp10 = SensorDot("TP10")
 
-        # --- Layout tweak:
-        # AF7 / AF8 closer to center
         grid.addWidget(self.dot_af7, 0, 1, alignment=Qt.AlignCenter)
         grid.addWidget(self.dot_af8, 0, 2, alignment=Qt.AlignCenter)
 
         grid.addItem(QSpacerItem(10, 10, QSizePolicy.Minimum, QSizePolicy.Expanding), 1, 1)
 
-        # TP9 / TP10 unchanged
         grid.addWidget(self.dot_tp9, 2, 0, alignment=Qt.AlignCenter)
         grid.addWidget(self.dot_tp10, 2, 3, alignment=Qt.AlignCenter)
 
@@ -139,9 +141,15 @@ class PreSessionScreen(QWidget):
             }
         """)
 
+        # Connection warning label (real-only UX)
+        self.conn_status = QLabel("")
+        self.conn_status.setWordWrap(True)
+        self.conn_status.setStyleSheet("font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;")
+
         root.addWidget(title)
         root.addWidget(subtitle)
         root.addWidget(diagram_card)
+        root.addWidget(self.conn_status)
         root.addWidget(self.start_btn, alignment=Qt.AlignLeft)
 
         # Timer
@@ -157,7 +165,24 @@ class PreSessionScreen(QWidget):
                 item.widget().deleteLater()
 
     def _tick(self):
-        st = self.reader.read()
+        try:
+            st = self.reader.read()
+            self.conn_status.setText("")
+        except Exception as e:
+            # Muse not connected / not enough samples / etc
+            self.dot_tp9.set_state(False)
+            self.dot_af7.set_state(False)
+            self.dot_af8.set_state(False)
+            self.dot_tp10.set_state(False)
+
+            self._clear_help()
+            self.conn_status.setText(
+                "Muse not ready. Turn it on, wear it, and close other Muse apps.\n"
+                f"({e})"
+            )
+            self.start_btn.setEnabled(False)
+            return
+
         sensors = {
             "TP9": st.TP9,
             "AF7": st.AF7,
