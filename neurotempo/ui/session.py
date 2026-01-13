@@ -40,8 +40,13 @@ class SessionScreen(QWidget):
     - End Session button (manual)
     - Tracks duration, avg focus, breaks triggered, avg HR, avg SpO2
     - Logs CSV
-    - Pops a center-screen break popup when focus is low for ~10s
-    - Saves session summary to per-user app data (macOS + Windows)
+    - Break popup logic (EEG-friendly):
+        * EMA smoothing (focus + fatigue)
+        * Adaptive focus threshold from baseline
+        * Fatigue gate (prevents early/false breaks)
+        * Grace period (no alerts at start)
+        * Sustained low required
+        * Cooldown after popup (no spam)
     """
     def __init__(self, baseline_focus: float, on_end):
         super().__init__()
@@ -54,9 +59,17 @@ class SessionScreen(QWidget):
         self.logger = SessionLogger()
         self.store = SessionStore()
 
-        # break detection state
-        self.low_focus_streak = 0
-        self.notified_break = False
+        # ---- Break policy (tuned for real EEG)
+        self.ema_alpha = 0.18              # smoothing strength
+        self.grace_s = 120                 # first 2 minutes: no break popups
+        self.low_required_s = 25           # must stay low for ~25s
+        self.cooldown_s = 8 * 60           # 8 min cooldown after popup
+
+        # derived + state
+        self.focus_ema = self.baseline_focus
+        self.fatigue_ema = 0.25            # start near simulator default
+        self.low_seconds = 0
+        self.last_break_ts = 0.0
         self.breaks_triggered = 0
 
         # stats
@@ -204,6 +217,15 @@ class SessionScreen(QWidget):
         self.timer.timeout.connect(self.update_metrics)
         self.timer.start(1000)
 
+    def _low_threshold(self) -> float:
+        # Adaptive threshold tied to baseline focus.
+        return max(0.25, min(0.60, self.baseline_focus * 0.70))
+
+    def _fatigue_gate(self) -> float:
+        # Require some fatigue before interrupting (prevents early alerts).
+        # You can tune this later; 0.45 is a good first gate for real EEG use.
+        return 0.45
+
     def update_metrics(self):
         try:
             m = self.sim.read()
@@ -217,49 +239,78 @@ class SessionScreen(QWidget):
             # logging
             self.logger.log(m.focus, m.fatigue, m.heart_rate, m.spo2)
 
-            # Low-focus detection (~10 seconds)
-            if m.focus < 0.40:
-                self.low_focus_streak += 1
+            # ---- Smooth focus + fatigue (EMA)
+            a = self.ema_alpha
+            self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
+            self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
+
+            # ---- Break logic (stable + non-spam + fatigue gate)
+            now = time.time()
+            elapsed = now - self.start_ts
+            threshold = self._low_threshold()
+            fatigue_gate = self._fatigue_gate()
+
+            in_grace = elapsed < self.grace_s
+            in_cooldown = (now - self.last_break_ts) < self.cooldown_s if self.last_break_ts > 0 else False
+
+            # Condition: focus low AND fatigue high enough
+            low_and_fatigued = (self.focus_ema < threshold) and (self.fatigue_ema >= fatigue_gate)
+
+            if not in_grace and not in_cooldown:
+                if low_and_fatigued:
+                    self.low_seconds += 1
+                else:
+                    self.low_seconds = 0
+
+                if self.low_seconds >= self.low_required_s:
+                    self.low_seconds = 0
+                    self.last_break_ts = now
+                    self.breaks_triggered += 1
+
+                    show_break_popup(
+                        "Neurotempo",
+                        "Focus stayed low and fatigue is building. Take a 2–5 minute reset break."
+                    )
             else:
-                self.low_focus_streak = 0
-                self.notified_break = False
+                self.low_seconds = 0
 
-            if self.low_focus_streak >= 10 and not self.notified_break:
-                # set flags first (prevents re-entrancy issues)
-                self.notified_break = True
-                self.breaks_triggered += 1
-
-                show_break_popup("Neurotempo", "Focus is low. Take a 2–5 minute reset break.")
-
-            # Bars
-            focus_pct = int(m.focus * 100)
-            fatigue_pct = int(m.fatigue * 100)
+            # Bars (use EMA for focus bar so it looks stable)
+            focus_pct = int(max(0.0, min(1.0, self.focus_ema)) * 100)
+            fatigue_pct = int(max(0.0, min(1.0, self.fatigue_ema)) * 100)
 
             self.focus_bar.setValue(focus_pct)
             self.fatigue_bar.setValue(fatigue_pct)
 
             self.focus_bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background: {bar_color(m.focus)}; }}"
+                f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}"
             )
             self.fatigue_bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background: {bar_color(1.0 - m.fatigue)}; }}"
+                f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}"
             )
 
             # Vitals
             self.hr_value.setText(f"{m.heart_rate} bpm")
             self.spo2_value.setText(f"{m.spo2} %")
 
-            # Status
-            if m.focus >= 0.65:
+            # Status (based on EMA + gate)
+            if in_grace:
+                self.state_value.setText("⚪ Settling in…")
+            elif self.focus_ema >= 0.65:
                 self.state_value.setText("🟢 Keep working")
-            elif m.focus >= 0.45:
+            elif self.focus_ema >= 0.45:
                 self.state_value.setText("🟡 Take a breath")
             else:
-                self.state_value.setText("🔴 Break triggered")
+                if in_cooldown:
+                    self.state_value.setText("🟠 Recovering (cooldown)")
+                else:
+                    if self.fatigue_ema < fatigue_gate:
+                        self.state_value.setText("🔵 Low focus (but not fatigued)")
+                    else:
+                        self.state_value.setText("🔴 Focus low + fatigue rising")
 
-            # Charts
-            self.focus_hist.append(m.focus)
-            self.hr_hist.append(m.heart_rate)
+            # Charts (raw focus/HR in charts)
+            self.focus_hist.append(float(m.focus))
+            self.hr_hist.append(int(m.heart_rate))
             self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
             self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
@@ -284,10 +335,10 @@ class SessionScreen(QWidget):
         summary = {
             "duration_s": duration_s,
             "baseline": self.baseline_focus,
-            "avg_focus": max(0.0, min(1.0, avg_focus)),
-            "breaks": self.breaks_triggered,
-            "avg_hr": avg_hr,
-            "avg_spo2": avg_spo2,
+            "avg_focus": max(0.0, min(1.0, float(avg_focus))),
+            "breaks": int(self.breaks_triggered),
+            "avg_hr": int(avg_hr),
+            "avg_spo2": int(avg_spo2),
         }
 
         try:
