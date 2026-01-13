@@ -1,3 +1,5 @@
+# neurotempo/ui/session.py
+
 import time
 from collections import deque
 

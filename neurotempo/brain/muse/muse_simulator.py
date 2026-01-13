@@ -1,3 +1,5 @@
+# neurotempo/brain/muse/muse_simulator.py
+
 import random
 from dataclasses import dataclass
 

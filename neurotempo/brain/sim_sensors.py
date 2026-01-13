@@ -1,3 +1,5 @@
+# neurotempo/brain/sim_sensors.py
+
 from dataclasses import dataclass
 import time
 
