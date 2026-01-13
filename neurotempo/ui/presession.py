@@ -8,8 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 
 from neurotempo.brain.sensor_quality import MuseSensorQuality
 
-
-GREEN_THRESHOLD = 0.5  # MuseSensorQuality returns 0.0 or 1.0
+GREEN_THRESHOLD = 0.5  # MuseSensorQuality returns 0..1
 
 
 def _card() -> QFrame:
@@ -60,7 +59,7 @@ class PreSessionScreen(QWidget):
         self.on_start = on_start
         self.brain = brain
 
-        # REAL signal quality reader (derived from live EEG)
+        # REAL signal quality reader
         self.reader = MuseSensorQuality(self.brain, window_sec=2.0)
 
         root = QVBoxLayout(self)
@@ -75,7 +74,6 @@ class PreSessionScreen(QWidget):
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("font-size: 14px; color: rgba(231,238,247,0.70);")
 
-        # ---- Diagram card
         diagram_card = _card()
         dlay = QVBoxLayout(diagram_card)
         dlay.setContentsMargins(18, 16, 18, 16)
@@ -96,7 +94,6 @@ class PreSessionScreen(QWidget):
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(18)
 
-        # Sensor dots
         self.dot_af7 = SensorDot("AF7")
         self.dot_af8 = SensorDot("AF8")
         self.dot_tp9 = SensorDot("TP9")
@@ -112,14 +109,13 @@ class PreSessionScreen(QWidget):
 
         dlay.addWidget(head)
 
-        # --- Red-only instructions
+        # Red-only help text area
         self.help_wrap = QFrame()
         self.help_layout = QVBoxLayout(self.help_wrap)
         self.help_layout.setContentsMargins(0, 0, 0, 0)
         self.help_layout.setSpacing(6)
         dlay.addWidget(self.help_wrap)
 
-        # --- Start button
         self.start_btn = QPushButton("Start calibration")
         self.start_btn.setEnabled(False)
         self.start_btn.setCursor(Qt.PointingHandCursor)
@@ -142,7 +138,6 @@ class PreSessionScreen(QWidget):
             }
         """)
 
-        # Connection warning label (real-only UX)
         self.conn_status = QLabel("")
         self.conn_status.setWordWrap(True)
         self.conn_status.setStyleSheet("font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;")
@@ -153,7 +148,6 @@ class PreSessionScreen(QWidget):
         root.addWidget(self.conn_status)
         root.addWidget(self.start_btn, alignment=Qt.AlignLeft)
 
-        # Timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(450)
@@ -176,14 +170,10 @@ class PreSessionScreen(QWidget):
             st = self.reader.read()
             self.conn_status.setText("")
         except Exception as e:
-            # Muse not connected / not enough samples / etc
             self._set_all_red()
             self._clear_help()
-            self.conn_status.setText(
-                "Muse not ready. Turn it on, wear it, and close other Muse apps."
-            )
+            self.conn_status.setText("Muse not ready. Turn it on, wear it, and close other Muse apps.")
             self.start_btn.setEnabled(False)
-            # Keep details in console for dev
             print("[Neurotempo] PreSession sensor check error:", repr(e))
             return
 
