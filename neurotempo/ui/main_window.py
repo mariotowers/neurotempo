@@ -219,14 +219,24 @@ class MainWindow(QMainWindow):
     # Muse connection gate (REAL-only)
     # --------------------------------------------------
 
+    def _muse_is_connected(self) -> bool:
+        """
+        Best-effort check. We avoid re-calling start() if already connected.
+        """
+        return bool(getattr(self.brain, "_connected", False))
+
     def _ensure_muse_connected(self) -> bool:
         """
         Returns True if Muse is connected and streaming.
         If not, shows blocker screen and returns False.
         """
         try:
-            self.brain.start()
+            if self._muse_is_connected():
+                return True
+
+            self.brain.start()  # will raise MuseNotReady if not available
             return True
+
         except MuseNotReady as e:
             self.muse_blocker.set_message(
                 "Muse not ready.\n\n"
@@ -235,6 +245,7 @@ class MainWindow(QMainWindow):
             )
             self.stack.setCurrentWidget(self.muse_blocker)
             return False
+
         except Exception as e:
             self.muse_blocker.set_message(
                 "Muse connection error.\n\n"
@@ -359,7 +370,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # Ensure BrainFlow session releases cleanly on exit
         try:
-            self.brain.stop()
+            if self._muse_is_connected():
+                self.brain.stop()
         except Exception:
             pass
         super().closeEvent(event)
