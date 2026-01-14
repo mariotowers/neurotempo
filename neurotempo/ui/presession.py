@@ -1,5 +1,3 @@
-# neurotempo/ui/presession.py
-
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QFrame,
     QGridLayout, QSpacerItem, QSizePolicy
@@ -44,7 +42,7 @@ class SensorDot(QLabel):
 
 
 def sensor_tip_for(sensor: str) -> str:
-    # ✅ KEEP ORIGINAL MESSAGES
+    # ✅ ORIGINAL MESSAGES — UNCHANGED
     tips = {
         "TP9":  "TP9 (left ear) has no contact. Move hair away and adjust it so it rests directly on skin.",
         "TP10": "TP10 (right ear) has no contact. Clear any hair and gently reposition it against your ear.",
@@ -60,14 +58,10 @@ class PreSessionScreen(QWidget):
         self.on_start = on_start
         self.brain = brain
 
-        # ✅ FAST, immediate green, delayed red
+        # ✅ FIX: remove unsupported args
         self.reader = MuseSensorQuality(
             brain=self.brain,
-            window_sec=0.75,
-            update_hz=8.0,
-            good_std=25.0,
-            bad_std=70.0,
-            bad_streak_to_red=6,
+            window_sec=1.0   # short window = fast response
         )
 
         root = QVBoxLayout(self)
@@ -117,35 +111,17 @@ class PreSessionScreen(QWidget):
 
         self.help_wrap = QFrame()
         self.help_layout = QVBoxLayout(self.help_wrap)
-        self.help_layout.setContentsMargins(0, 0, 0, 0)
         self.help_layout.setSpacing(6)
         dlay.addWidget(self.help_wrap)
 
         self.start_btn = QPushButton("Start calibration")
         self.start_btn.setEnabled(False)
-        self.start_btn.setCursor(Qt.PointingHandCursor)
         self.start_btn.clicked.connect(self.on_start)
-        self.start_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.14);
-                border-radius: 14px;
-                padding: 12px 18px;
-                font-weight: 750;
-                min-width: 220px;
-            }
-            QPushButton:hover { background: rgba(255,255,255,0.14); }
-            QPushButton:pressed { background: rgba(255,255,255,0.20); }
-            QPushButton:disabled {
-                background: rgba(255,255,255,0.03);
-                border: 1px solid rgba(255,255,255,0.06);
-                color: rgba(231,238,247,0.35);
-            }
-        """)
 
         self.conn_status = QLabel("")
-        self.conn_status.setWordWrap(True)
-        self.conn_status.setStyleSheet("font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;")
+        self.conn_status.setStyleSheet(
+            "font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;"
+        )
 
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -155,7 +131,8 @@ class PreSessionScreen(QWidget):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
-        self.timer.start(120)  # very responsive UI
+        self.timer.start(250)  # ✅ immediate feel
+
         self._tick()
 
     def _clear_help(self):
@@ -165,21 +142,20 @@ class PreSessionScreen(QWidget):
                 item.widget().deleteLater()
 
     def _set_all_red(self):
-        self.dot_tp9.set_state(False)
-        self.dot_af7.set_state(False)
-        self.dot_af8.set_state(False)
-        self.dot_tp10.set_state(False)
+        for d in (self.dot_tp9, self.dot_af7, self.dot_af8, self.dot_tp10):
+            d.set_state(False)
 
     def _tick(self):
         try:
             st = self.reader.read()
             self.conn_status.setText("")
-        except Exception as e:
+        except Exception:
             self._set_all_red()
             self._clear_help()
-            self.conn_status.setText("Muse not ready. Turn it on, wear it, and close other Muse apps.")
+            self.conn_status.setText(
+                "Muse not ready. Turn it on, wear it, and close other Muse apps."
+            )
             self.start_btn.setEnabled(False)
-            print("[Neurotempo] PreSession sensor check error:", repr(e))
             return
 
         sensors = {
@@ -198,9 +174,11 @@ class PreSessionScreen(QWidget):
 
         self._clear_help()
         for key in red:
-            lbl = QLabel(sensor_tip_for(key))  # ✅ original messages
+            lbl = QLabel(sensor_tip_for(key))
             lbl.setWordWrap(True)
-            lbl.setStyleSheet("font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;")
+            lbl.setStyleSheet(
+                "font-size: 13px; color: rgba(239,68,68,0.92); font-weight: 650;"
+            )
             self.help_layout.addWidget(lbl)
 
         self.start_btn.setEnabled(len(red) == 0)

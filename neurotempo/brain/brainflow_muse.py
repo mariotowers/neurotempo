@@ -3,151 +3,97 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
-from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds, BrainFlowPresets
+from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
 from brainflow.data_filter import DataFilter
 
 from neurotempo.brain.brain_api import BrainAPI, BrainMetrics
 
 
 class MuseNotReady(Exception):
-    """Raised when Muse is not connected or not streaming real data."""
     pass
 
 
 class BrainFlowMuseBrain(BrainAPI):
-    """
-    Real Muse 2 backend (production-safe):
-    - Auto-discovers any Muse 2 by default
-    - Optional device_id locks to one specific Muse
-    - NEVER returns fake data
-    - read_metrics() returns REAL EEG-derived focus/fatigue and optional HR/SpO2 if PPG is available
-    """
-
     def __init__(
         self,
-        device_id: Optional[str] = None,   # None = auto-discovery, else lock to one device
+        device_id: Optional[str] = None,
         timeout_s: float = 15.0,
-        window_sec: float = 2.0,           # EEG window
+        window_sec: float = 2.0,
         smooth_n: int = 8,
-        enable_logs: bool = False,
-        enable_ppg: bool = True,           # try to enable PPG for HR/SpO2
-        ppg_window_sec: float = 8.0,       # longer window for HR stability
     ):
         self.device_id = device_id
         self.timeout_s = float(timeout_s)
         self.window_sec = float(window_sec)
-        self.ppg_window_sec = float(ppg_window_sec)
-
-        self.smooth_n = int(max(2, smooth_n))
-        self.enable_logs = bool(enable_logs)
-        self.enable_ppg = bool(enable_ppg)
+        self.smooth_n = max(2, int(smooth_n))
 
         self.board_id = BoardIds.MUSE_2_BOARD.value
         self.params = BrainFlowInputParams()
 
-        self.board: Optional[BoardShim] = None
+        self.board = None
         self._connected = False
 
-        # EEG
-        self.fs: int = 256
-        self.eeg_channels: list[int] = []
-
-        # PPG (ANCILLARY preset, if available)
-        self.fs_ppg: Optional[int] = None
-        self.ppg_channels: list[int] = []  # expects at least IR+RED
+        self.fs = 256
+        self.eeg_channels = []
 
         self._focus_hist = deque(maxlen=self.smooth_n)
         self._fatigue_hist = deque(maxlen=self.smooth_n)
+
+        # Validity smoothing (prevents flicker)
+        self._valid_hist = deque(maxlen=6)
 
     # -----------------------
     # Lifecycle
     # -----------------------
 
-    def start(self) -> None:
+    def start(self):
         """
-        Connect to Muse 2 and confirm real EEG samples are arriving.
-        Raises MuseNotReady if not found / in use / no samples.
+        Connect and verify we are actually receiving samples.
         """
-        self.params = BrainFlowInputParams()
+        # If already running, do nothing
+        if self._connected and self.board is not None:
+            return
 
+        self.params = BrainFlowInputParams()
         if self.device_id:
             self.params.mac_address = self.device_id
-
         self.params.timeout = int(self.timeout_s)
-
-        if self.enable_logs:
-            BoardShim.enable_dev_board_logger()
 
         self.board = BoardShim(self.board_id, self.params)
 
         try:
             self.board.prepare_session()
-
-            # Try enabling PPG on Muse (safe if unsupported)
-            if self.enable_ppg:
-                try:
-                    self.board.config_board("p50")
-                except Exception:
-                    pass
-
             self.board.start_stream(45000)
+
+            self.fs = int(BoardShim.get_sampling_rate(self.board_id))
+            self.eeg_channels = list(BoardShim.get_eeg_channels(self.board_id))
+
+            if not self.eeg_channels:
+                raise MuseNotReady("No EEG channels")
+
+            # Confirm we can pull a meaningful buffer (avoid “connected but empty”)
+            need = int(max(self.fs, self.window_sec * self.fs))  # >= 1 sec or window
+            t0 = time.time()
+            ok = False
+            while time.time() - t0 < self.timeout_s:
+                data = self.board.get_current_board_data(need)
+                if data is not None and data.shape[1] >= need:
+                    ok = True
+                    break
+                time.sleep(0.15)
+
+            if not ok:
+                raise MuseNotReady("No EEG samples arriving yet")
+
+            self._connected = True
+
         except Exception as e:
-            self._cleanup()
-            raise MuseNotReady(f"Failed to connect/prepare Muse stream: {e!r}")
+            self.stop()
+            raise MuseNotReady(str(e))
 
-        # EEG sampling rate & channels (DEFAULT preset)
-        try:
-            self.fs = int(BoardShim.get_sampling_rate(self.board_id, BrainFlowPresets.DEFAULT_PRESET.value))
-        except Exception:
-            self.fs = 256
-
-        try:
-            self.eeg_channels = list(BoardShim.get_eeg_channels(self.board_id, BrainFlowPresets.DEFAULT_PRESET.value))
-        except Exception:
-            self.eeg_channels = []
-
-        if not self.eeg_channels:
-            self._cleanup()
-            raise MuseNotReady("Muse started but EEG channels were not found")
-
-        # PPG channels & sampling rate (ANCILLARY preset)
-        self.ppg_channels = []
-        self.fs_ppg = None
-        if self.enable_ppg:
-            try:
-                self.ppg_channels = list(
-                    BoardShim.get_ppg_channels(self.board_id, BrainFlowPresets.ANCILLARY_PRESET.value)
-                )
-                self.fs_ppg = int(
-                    BoardShim.get_sampling_rate(self.board_id, BrainFlowPresets.ANCILLARY_PRESET.value)
-                )
-            except Exception:
-                self.ppg_channels = []
-                self.fs_ppg = None
-
-        # Confirm enough EEG samples arrive
-        n = int(max(self.fs, self.window_sec * self.fs))  # at least ~1 sec
-        t0 = time.time()
-        while time.time() - t0 < self.timeout_s:
-            try:
-                data = self.board.get_current_board_data(n, BrainFlowPresets.DEFAULT_PRESET.value)
-                if data is not None and data.shape[1] >= n:
-                    self._connected = True
-                    return
-            except Exception:
-                pass
-            time.sleep(0.15)
-
-        self._cleanup()
-        raise MuseNotReady("Muse not detected / no EEG samples. Turn it on, wear it, and close other Muse apps.")
-
-    def stop(self) -> None:
-        self._cleanup()
-
-    def _cleanup(self) -> None:
+    def stop(self):
         try:
             if self.board:
                 try:
@@ -163,112 +109,104 @@ class BrainFlowMuseBrain(BrainAPI):
             self._connected = False
             self._focus_hist.clear()
             self._fatigue_hist.clear()
+            self._valid_hist.clear()
 
     # -----------------------
-    # Small helper used by CalibrationScreen
+    # Signal validity
     # -----------------------
 
-    def sample_focus(self) -> float:
-        return float(self.read_metrics().focus)
-
-    # -----------------------
-    # Internal data getters
-    # -----------------------
-
-    def get_current_eeg(self, n: int) -> np.ndarray:
+    def _signal_is_valid(self, data: np.ndarray) -> bool:
         """
-        Returns raw board data for DEFAULT preset.
-        Used by sensor quality check.
-        """
-        if not self._connected or not self.board:
-            raise MuseNotReady("Muse is not connected")
-        data = self.board.get_current_board_data(n, BrainFlowPresets.DEFAULT_PRESET.value)
-        if data is None or data.shape[1] < n:
-            raise MuseNotReady("Muse connected but not enough EEG samples yet")
-        return data
+        Detect 'not worn' / 'bad contact' using a stronger rule than STD-only.
 
-    def _get_ppg_pair(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[int]]:
+        We combine:
+        - STD range (off-head can be too low OR too high)
+        - Peak-to-peak range (very useful for off-head flat/noisy signals)
+        - "most electrodes ok" requirement
+        - small hysteresis via _valid_hist to prevent flicker
         """
-        Returns (IR, RED, fs_ppg) if available, else (None, None, None).
-        """
-        if not self.enable_ppg or not self.board or not self.ppg_channels or not self.fs_ppg:
-            return None, None, None
-        if len(self.ppg_channels) < 2:
-            return None, None, None
-
-        n = int(self.ppg_window_sec * self.fs_ppg)
         try:
-            anc = self.board.get_current_board_data(n, BrainFlowPresets.ANCILLARY_PRESET.value)
+            eeg = data[self.eeg_channels, :]
+            if eeg.size == 0:
+                return False
+
+            # BrainFlow Muse EEG is in microvolts.
+            stds = np.std(eeg, axis=1)
+            ptp = np.ptp(eeg, axis=1)  # peak-to-peak
+
+            # Tuned for Muse 2: easier to get "green", but still blocks off-head garbage
+            # If you want "even easier", raise std_low to 4.0 and ptp_low to 15.0.
+            std_low, std_high = 5.0, 220.0
+            ptp_low, ptp_high = 25.0, 900.0
+
+            per_ch_ok = (stds >= std_low) & (stds <= std_high) & (ptp >= ptp_low) & (ptp <= ptp_high)
+
+            # Require at least 3 of 4 electrodes ok (Muse 2 has 4 EEG)
+            needed = max(3, len(self.eeg_channels) - 1)
+            instant_valid = int(np.sum(per_ch_ok)) >= needed
+
+            # Smooth validity to prevent dots/metrics flickering
+            self._valid_hist.append(1 if instant_valid else 0)
+            # consider "valid" if at least 4 of last 6 were valid
+            return sum(self._valid_hist) >= 4
+
         except Exception:
-            return None, None, None
-
-        if anc is None or anc.shape[1] < n:
-            return None, None, None
-
-        ch_ir = self.ppg_channels[0]
-        ch_red = self.ppg_channels[1]
-
-        try:
-            ir = anc[ch_ir, :].astype(np.float64, copy=False)
-            red = anc[ch_red, :].astype(np.float64, copy=False)
-            return ir, red, int(self.fs_ppg)
-        except Exception:
-            return None, None, None
+            return False
 
     # -----------------------
-    # Metrics (REAL EEG + optional PPG)
+    # Metrics
     # -----------------------
 
     def read_metrics(self) -> BrainMetrics:
         if not self._connected or not self.board:
-            raise MuseNotReady("Muse is not connected")
+            # Session UI will show zeros (per your request)
+            return BrainMetrics(0.0, 0.0, 0, 0)
 
         n = int(self.window_sec * self.fs)
-        data = self.get_current_eeg(n)
+        try:
+            data = self.board.get_current_board_data(n)
+        except Exception:
+            return BrainMetrics(0.0, 0.0, 0, 0)
 
-        # EEG band powers (BrainFlow expects FULL board data + eeg channel indices)
-        rel_powers, _abs_powers = DataFilter.get_avg_band_powers(
-            data,
-            self.eeg_channels,
-            self.fs,
-            True
-        )
+        if data is None or data.shape[1] < n:
+            return BrainMetrics(0.0, 0.0, 0, 0)
+
+        # Not worn / bad contact => zeros
+        if not self._signal_is_valid(data):
+            self._focus_hist.clear()
+            self._fatigue_hist.clear()
+            return BrainMetrics(0.0, 0.0, 0, 0)
+
+        # Compute relative band powers from FULL board data + EEG channel indices
+        try:
+            rel_powers, _ = DataFilter.get_avg_band_powers(
+                data,
+                self.eeg_channels,
+                self.fs,
+                True
+            )
+        except Exception:
+            return BrainMetrics(0.0, 0.0, 0, 0)
 
         # rel_powers: delta, theta, alpha, beta, gamma
         _, theta, alpha, beta, _ = rel_powers
 
-        focus_raw = beta / max(alpha + theta, 1e-6)
-        fatigue_raw = theta / max(alpha + beta, 1e-6)
+        focus = beta / max(alpha + theta, 1e-6)
+        fatigue = theta / max(alpha + beta, 1e-6)
 
-        focus = float(np.clip(focus_raw, 0.0, 1.0))
-        fatigue = float(np.clip(fatigue_raw, 0.0, 1.0))
+        focus = float(np.clip(focus, 0.0, 1.0))
+        fatigue = float(np.clip(fatigue, 0.0, 1.0))
 
-        # smooth
         self._focus_hist.append(focus)
         self._fatigue_hist.append(fatigue)
-        focus = float(np.mean(self._focus_hist))
-        fatigue = float(np.mean(self._fatigue_hist))
 
-        # Optional HR/SpO2 from PPG if truly available
-        heart_rate = None
-        spo2 = None
-
-        ir, red, fs_ppg = self._get_ppg_pair()
-        if ir is not None and red is not None and fs_ppg:
-            try:
-                # BrainFlow has helpers for PPG processing; availability depends on version/device.
-                # If these fail, we keep None (no fake).
-                heart_rate = int(round(DataFilter.get_heart_rate(ir, fs_ppg)))
-            except Exception:
-                heart_rate = None
-            try:
-                spo2 = int(round(DataFilter.get_oxygen_level(ir, red, fs_ppg)))
-            except Exception:
-                spo2 = None
-
+        # Muse 2 HR/SpO2 not implemented here yet => keep 0
         return BrainMetrics(
-            focus=focus,
-            fatigue=fatigue,
-            heart_rate=heart_rate,
-            spo2=spo2,
+            focus=float(np.mean(self._focus_hist)),
+            fatigue=float(np.mean(self._fatigue_hist)),
+            heart_rate=0,
+            spo2=0,
         )
+
+    def sample_focus(self) -> float:
+        return float(self.read_metrics().focus)

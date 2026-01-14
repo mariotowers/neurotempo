@@ -1,5 +1,3 @@
-# neurotempo/ui/main_window.py
-
 import sys
 
 from PySide6.QtWidgets import (
@@ -29,11 +27,11 @@ from neurotempo.ui.session_detail import SessionDetailScreen
 from neurotempo.brain.brainflow_muse import BrainFlowMuseBrain, MuseNotReady
 
 
+# ==================================================
+# Muse Not Ready Screen (simple, no flow changes)
+# ==================================================
+
 class MuseBlockerScreen(QWidget):
-    """
-    Shown when Muse is not ready/connected.
-    Keeps the app flow clean without simulations.
-    """
     def __init__(self, on_retry):
         super().__init__()
         self.on_retry = on_retry
@@ -43,22 +41,22 @@ class MuseBlockerScreen(QWidget):
         root.setSpacing(14)
         root.setAlignment(Qt.AlignCenter)
 
-        self.title = QLabel("Muse not ready")
-        self.title.setAlignment(Qt.AlignCenter)
-        self.title.setStyleSheet("font-size: 24px; font-weight: 900;")
+        title = QLabel("Muse not ready")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 24px; font-weight: 900;")
 
         self.msg = QLabel(
             "Turn Muse on and wear it.\n"
-            "Close any other Muse apps, then retry."
+            "Close any other Muse apps and retry."
         )
         self.msg.setAlignment(Qt.AlignCenter)
         self.msg.setWordWrap(True)
         self.msg.setStyleSheet("color: rgba(231,238,247,0.78); font-size: 14px;")
 
-        self.retry = QPushButton("Retry connection")
-        self.retry.setCursor(Qt.PointingHandCursor)
-        self.retry.clicked.connect(self.on_retry)
-        self.retry.setStyleSheet("""
+        retry = QPushButton("Retry connection")
+        retry.setCursor(Qt.PointingHandCursor)
+        retry.clicked.connect(self.on_retry)
+        retry.setStyleSheet("""
             QPushButton {
                 background: rgba(34,197,94,0.14);
                 border: 1px solid rgba(34,197,94,0.28);
@@ -71,14 +69,18 @@ class MuseBlockerScreen(QWidget):
             QPushButton:pressed { background: rgba(34,197,94,0.26); }
         """)
 
-        root.addWidget(self.title)
+        root.addWidget(title)
         root.addWidget(self.msg)
-        root.addSpacing(8)
-        root.addWidget(self.retry)
+        root.addSpacing(10)
+        root.addWidget(retry)
 
     def set_message(self, text: str):
         self.msg.setText(text)
 
+
+# ==================================================
+# Main Window
+# ==================================================
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -87,18 +89,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Neurotempo")
         self.resize(980, 680)
 
-        # Frameless + translucent background (rounded corners)
+        # Frameless window
         self.setWindowFlag(Qt.FramelessWindowHint, True)
-        self.setWindowFlag(Qt.Tool, True)  # macOS utility behavior
+        self.setWindowFlag(Qt.Tool, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self._radius = 18
         self._shadow_margin = 22
 
-        # ---- Outer container (shadow space)
+        # ---- Outer container (shadow)
         outer = QWidget()
         outer.setAttribute(Qt.WA_TranslucentBackground, True)
-        outer.setStyleSheet("background: transparent;")
 
         outer_layout = QVBoxLayout(outer)
         outer_layout.setContentsMargins(
@@ -109,7 +110,7 @@ class MainWindow(QMainWindow):
         )
         outer_layout.setSpacing(0)
 
-        # ---- Inner rounded container (app surface)
+        # ---- Inner container
         self.container = QWidget()
         self.container.setObjectName("appContainer")
         self.container.setStyleSheet(f"""
@@ -139,7 +140,6 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # ---- Title bar (gear opens settings — enabled only on Splash)
         self.titlebar = TitleBar(self, "Neurotempo", on_settings=self.go_settings)
 
         container_layout.addWidget(self.titlebar)
@@ -147,207 +147,149 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.container)
         self.setCentralWidget(outer)
 
-        # ---- SINGLE REAL Muse backend owned by MainWindow
-        # device_id=None => auto discovery (works with any Muse)
-        # If you want to lock: device_id="7159EEF5-52BA-D787-7F30-636806BD9424"
+        # ==================================================
+        # REAL Muse backend (NO enable_logs)
+        # ==================================================
+
         self.brain = BrainFlowMuseBrain(
             device_id=None,
             timeout_s=15.0,
-            window_sec=2.0,
-            enable_logs=False
+            window_sec=2.0
         )
 
-        # ---- Screens
+        # ==================================================
+        # Screens
+        # ==================================================
+
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
-
-        # PreSession needs brain now (REAL sensor check)
-        self.presession = PreSessionScreen(brain=self.brain, on_start=self.go_calibration)
-
-        # Muse blocker (retry)
         self.muse_blocker = MuseBlockerScreen(on_retry=self.go_presession)
-
-        # Calibration needs brain now (REAL baseline)
+        self.presession = PreSessionScreen(brain=self.brain, on_start=self.go_calibration)
         self.calibration = CalibrationScreen(seconds=30, brain=self.brain, on_done=self.go_session)
 
-        self._prev_screen = None
         self.settings = SettingsScreen(on_back=self.go_back_from_settings)
-
-        # End Session -> Summary ; Summary Done -> History
         self.summary = SummaryScreen(on_done=self.go_history)
 
-        # History Back -> Splash ; New Session -> Splash ; Row -> detail
         self.history = SessionHistoryScreen(
             on_back=self.go_splash,
             on_new_session=self.go_splash,
             on_open_detail=self.open_session_detail,
         )
 
-        # Detail Back -> History
         self.detail = SessionDetailScreen(on_back=self.go_history)
-
         self.session = None
 
-        # ---- Stack order
-        self.stack.addWidget(self.splash)
-        self.stack.addWidget(self.muse_blocker)
-        self.stack.addWidget(self.presession)
-        self.stack.addWidget(self.calibration)
-        self.stack.addWidget(self.settings)
-        self.stack.addWidget(self.summary)
-        self.stack.addWidget(self.history)
-        self.stack.addWidget(self.detail)
+        for w in (
+            self.splash,
+            self.muse_blocker,
+            self.presession,
+            self.calibration,
+            self.settings,
+            self.summary,
+            self.history,
+            self.detail,
+        ):
+            self.stack.addWidget(w)
 
         self.stack.setCurrentWidget(self.splash)
-
+        self._set_settings_enabled(True)
         self._place_safely()
 
-        # Start with Settings enabled (Splash only)
-        self._set_settings_enabled(True)
-
-    # --------------------------------------------------
-    # Settings availability (Splash only)
-    # --------------------------------------------------
+    # ==================================================
+    # Settings gating
+    # ==================================================
 
     def _set_settings_enabled(self, enabled: bool):
         btn = getattr(self.titlebar, "settings_btn", None)
-        if not btn:
-            return
-        btn.setEnabled(enabled)
-        btn.setToolTip("" if enabled else "Settings are locked once a session begins.")
+        if btn:
+            btn.setEnabled(enabled)
 
-    # --------------------------------------------------
-    # Muse connection gate (REAL-only)
-    # --------------------------------------------------
+    # ==================================================
+    # Muse gate
+    # ==================================================
 
-    def _muse_is_connected(self) -> bool:
-        """
-        Best-effort check. We avoid re-calling start() if already connected.
-        """
-        return bool(getattr(self.brain, "_connected", False))
-
-    def _ensure_muse_connected(self) -> bool:
-        """
-        Returns True if Muse is connected and streaming.
-        If not, shows blocker screen and returns False.
-        """
+    def _ensure_muse(self) -> bool:
         try:
-            if self._muse_is_connected():
-                return True
-
-            self.brain.start()  # will raise MuseNotReady if not available
+            self.brain.start()
             return True
-
         except MuseNotReady as e:
-            self.muse_blocker.set_message(
-                "Muse not ready.\n\n"
-                f"{e}\n\n"
-                "Turn Muse on, wear it, close other Muse apps, then retry."
-            )
+            self.muse_blocker.set_message(str(e))
             self.stack.setCurrentWidget(self.muse_blocker)
             return False
 
-        except Exception as e:
-            self.muse_blocker.set_message(
-                "Muse connection error.\n\n"
-                f"{e}\n\n"
-                "Retry."
-            )
-            self.stack.setCurrentWidget(self.muse_blocker)
-            return False
-
-    # --------------------------------------------------
+    # ==================================================
     # Navigation
-    # --------------------------------------------------
+    # ==================================================
 
     def go_splash(self):
         self._set_settings_enabled(True)
         self.stack.setCurrentWidget(self.splash)
 
-    def go_presession(self, _summary=None):
+    def go_presession(self, *_):
         self._set_settings_enabled(False)
-
-        # Gate presession so the sensor dots are real
-        if not self._ensure_muse_connected():
+        if not self._ensure_muse():
             return
-
         self.stack.setCurrentWidget(self.presession)
 
     def go_calibration(self):
         self._set_settings_enabled(False)
-
-        # Gate calibration as well (in case user navigated fast)
-        if not self._ensure_muse_connected():
+        if not self._ensure_muse():
             return
-
         self.stack.setCurrentWidget(self.calibration)
 
     def go_session(self, baseline_focus: float):
         self._set_settings_enabled(False)
 
-        if self.session is not None:
+        if self.session:
             self.stack.removeWidget(self.session)
             self.session.deleteLater()
 
-        # ✅ Snapshot the *saved* settings for this session
         settings_snapshot = self.settings.get_settings()
 
         self.session = SessionScreen(
             baseline_focus=baseline_focus,
             brain=self.brain,
             settings=settings_snapshot,
-            on_end=self.go_summary
+            on_end=self.go_summary,
         )
+
         self.stack.addWidget(self.session)
         self.stack.setCurrentWidget(self.session)
 
     def go_summary(self, summary: dict):
-        self._set_settings_enabled(False)
         self.summary.set_summary(summary)
         self.stack.setCurrentWidget(self.summary)
 
-    def go_history(self, _summary=None):
-        self._set_settings_enabled(False)
+    def go_history(self, *_):
         try:
             self.history.refresh()
         except Exception:
             pass
         self.stack.setCurrentWidget(self.history)
 
-    def open_session_detail(self, session_item: dict):
-        self._set_settings_enabled(False)
-        self.detail.set_record(session_item)
+    def open_session_detail(self, item: dict):
+        self.detail.set_record(item)
         self.stack.setCurrentWidget(self.detail)
 
     def go_settings(self):
-        # Only allowed on splash — keep safe even if button misfires
-        if self.stack.currentWidget() is not self.splash:
-            return
-
-        self._prev_screen = self.stack.currentWidget()
-        self.stack.setCurrentWidget(self.settings)
+        if self.stack.currentWidget() is self.splash:
+            self.stack.setCurrentWidget(self.settings)
 
     def go_back_from_settings(self):
-        # Return to previous (should be splash)
-        if self._prev_screen is not None:
-            self.stack.setCurrentWidget(self._prev_screen)
-        else:
-            self.stack.setCurrentWidget(self.splash)
+        self.stack.setCurrentWidget(self.splash)
 
-    # --------------------------------------------------
-    # Window shaping
-    # --------------------------------------------------
+    # ==================================================
+    # Window shape
+    # ==================================================
 
     def _place_safely(self):
         screen = QGuiApplication.primaryScreen()
-        if not screen:
-            return
-        g = screen.availableGeometry()
-        self.move(g.x() + 80, g.y() + 80)
+        if screen:
+            g = screen.availableGeometry()
+            self.move(g.x() + 80, g.y() + 80)
 
     def _apply_rounded_mask(self):
         w, h = self.width(), self.height()
         m, r = self._shadow_margin, self._radius
-
         rect = QRectF(m, m, w - 2 * m, h - 2 * m)
         path = QPainterPath()
         path.addRoundedRect(rect, r, r)
@@ -361,21 +303,17 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._apply_rounded_mask()
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.close()
-            return
-        super().keyPressEvent(event)
-
     def closeEvent(self, event):
-        # Ensure BrainFlow session releases cleanly on exit
         try:
-            if self._muse_is_connected():
-                self.brain.stop()
+            self.brain.stop()
         except Exception:
             pass
         super().closeEvent(event)
 
+
+# ==================================================
+# App entry
+# ==================================================
 
 def launch_app():
     app = QApplication(sys.argv)

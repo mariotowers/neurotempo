@@ -1,105 +1,61 @@
 # neurotempo/brain/sensor_quality.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-import time
-from typing import Dict, Tuple
-
 import numpy as np
-
-from neurotempo.brain.brainflow_muse import MuseNotReady
+from dataclasses import dataclass
 
 
 @dataclass
-class SensorStatus:
-    TP9: float
+class SensorQuality:
     AF7: float
     AF8: float
+    TP9: float
     TP10: float
 
 
 class MuseSensorQuality:
     """
-    REAL Muse 2 sensor contact check with Apple-level UX:
-
-    ✅ Red -> Green: IMMEDIATE (1 good read turns green)
-    ✅ Green -> Red: DELAYED (must be bad for N consecutive reads)
-    ✅ No simulation, no fake impedance.
-
-    How it works:
-    - Reads raw EEG for 4 channels (TP9, AF7, AF8, TP10).
-    - Uses signal standard deviation (uV-ish) as a practical "contact quality" proxy.
-    - Hysteresis + debounce keeps UX stable.
+    REAL sensor contact estimation using EEG amplitude stability.
+    - Returns 0.0 (bad) or 1.0 (good) per sensor
+    - NO dependency on brainflow_muse (avoids circular imports)
     """
 
     def __init__(
         self,
         brain,
-        window_sec: float = 0.75,   # short window => fast response
-        update_hz: float = 8.0,     # fast UI updates
-        good_std: float = 25.0,     # <= this => good contact (green)
-        bad_std: float = 70.0,      # >= this => clearly bad (candidate for red)
-        bad_streak_to_red: int = 6, # needs N bad reads to flip to red
+        window_sec: float = 1.0,
+        min_std_uv: float = 3.0,
+        max_std_uv: float = 80.0,
     ):
         self.brain = brain
         self.window_sec = float(window_sec)
-        self.update_period = 1.0 / float(update_hz)
+        self.min_std = float(min_std_uv)
+        self.max_std = float(max_std_uv)
 
-        self.good_std = float(good_std)
-        self.bad_std = float(bad_std)
-        self.bad_streak_to_red = int(max(1, bad_streak_to_red))
+    def read(self) -> SensorQuality:
+        if not self.brain.board or not self.brain._connected:
+            raise RuntimeError("Muse not connected")
 
-        self._last_ts = 0.0
+        fs = self.brain.fs
+        n = int(self.window_sec * fs)
 
-        # stable boolean states
-        self._state: Dict[str, float] = {"TP9": 0.0, "AF7": 0.0, "AF8": 0.0, "TP10": 0.0}
-        self._bad_streak: Dict[str, int] = {"TP9": 0, "AF7": 0, "AF8": 0, "TP10": 0}
-
-    def read(self) -> SensorStatus:
-        now = time.time()
-        if (now - self._last_ts) < self.update_period:
-            return SensorStatus(**self._state)
-
-        self._last_ts = now
-
-        # We use the underlying BrainFlowMuseBrain board directly to avoid extra APIs.
-        board = getattr(self.brain, "board", None)
-        fs = int(getattr(self.brain, "fs", 256))
-        eeg_channels = list(getattr(self.brain, "eeg_channels", []))
-
-        if board is None or not eeg_channels:
-            raise MuseNotReady("Muse is not connected")
-
-        n = int(max(32, self.window_sec * fs))
-        data = board.get_current_board_data(n)
+        data = self.brain.board.get_current_board_data(n)
         if data is None or data.shape[1] < n:
-            raise MuseNotReady("Not enough EEG samples yet")
+            raise RuntimeError("Not enough EEG samples")
 
-        # Muse 2 4 EEG channels: BrainFlow order typically = [TP9, AF7, AF8, TP10]
-        names = ["TP9", "AF7", "AF8", "TP10"]
-        chans = eeg_channels[:4]
-        if len(chans) < 4:
-            raise MuseNotReady("Expected 4 EEG channels")
+        eeg = data[self.brain.eeg_channels, :]
 
-        for name, ch in zip(names, chans):
-            x = np.asarray(data[ch], dtype=np.float64)
-            x = x - float(np.mean(x))
-            std = float(np.std(x))
+        # Standard deviation per channel (µV)
+        stds = np.std(eeg, axis=1)
 
-            # ✅ IMMEDIATE GREEN when clearly good
-            if std <= self.good_std:
-                self._state[name] = 1.0
-                self._bad_streak[name] = 0
-                continue
+        def ok(std):
+            return float(self.min_std <= std <= self.max_std)
 
-            # Ambiguous zone: keep last state (prevents flicker)
-            if std < self.bad_std:
-                self._bad_streak[name] = 0
-                continue
-
-            # Candidate for red (bad)
-            self._bad_streak[name] += 1
-            if self._bad_streak[name] >= self.bad_streak_to_red:
-                self._state[name] = 0.0
-
-        return SensorStatus(**self._state)
+        # Muse 2 channel order:
+        # [AF7, AF8, TP9, TP10]
+        return SensorQuality(
+            AF7=ok(stds[0]),
+            AF8=ok(stds[1]),
+            TP9=ok(stds[2]),
+            TP10=ok(stds[3]),
+        )

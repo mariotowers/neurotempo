@@ -65,6 +65,9 @@ class SessionScreen(QWidget):
         self.last_break_ts = 0.0
         self.breaks_triggered = 0
 
+        # signal state
+        self.signal_ok = True
+
         # stats
         self.start_ts = time.time()
         self.samples = 0
@@ -75,9 +78,9 @@ class SessionScreen(QWidget):
         self.hr_samples = 0
         self.spo2_samples = 0
 
-        # last-known vitals (so we never log fake zeros)
-        self._last_hr = None
-        self._last_spo2 = None
+        # last-known vitals
+        self._last_hr = 0
+        self._last_spo2 = 0
 
         # warm-up (skip first couple reads)
         self._warmup_skip = 2
@@ -86,7 +89,7 @@ class SessionScreen(QWidget):
         # history buffers (60 points)
         self.max_points = 60
         self.focus_hist = deque([self.baseline_focus] * self.max_points, maxlen=self.max_points)
-        self.hr_hist = deque([72] * self.max_points, maxlen=self.max_points)
+        self.hr_hist = deque([0] * self.max_points, maxlen=self.max_points)
         self.x_hist = deque(range(-self.max_points + 1, 1), maxlen=self.max_points)
 
         # --- Header
@@ -146,12 +149,12 @@ class SessionScreen(QWidget):
 
         self.hr_title = QLabel("Heart Rate")
         self.hr_title.setObjectName("muted")
-        self.hr_value = QLabel("— bpm")
+        self.hr_value = QLabel("0 bpm")
         self.hr_value.setStyleSheet("font-size: 22px; font-weight: 750;")
 
         self.spo2_title = QLabel("SpO₂")
         self.spo2_title.setObjectName("muted")
-        self.spo2_value = QLabel("— %")
+        self.spo2_value = QLabel("0 %")
         self.spo2_value.setStyleSheet("font-size: 22px; font-weight: 750;")
 
         self.state_title = QLabel("Status")
@@ -196,7 +199,7 @@ class SessionScreen(QWidget):
         self.hr_plot.setBackground(None)
         self.hr_plot.showGrid(x=True, y=True, alpha=0.2)
         self.hr_plot.setTitle("Heart Rate Trend (last ~60s)")
-        self.hr_plot.setYRange(50, 120)
+        self.hr_plot.setYRange(0, 120)
 
         self.focus_curve = self.focus_plot.plot(list(self.x_hist), list(self.focus_hist))
         self.hr_curve = self.hr_plot.plot(list(self.x_hist), list(self.hr_hist))
@@ -228,110 +231,148 @@ class SessionScreen(QWidget):
     def _fatigue_gate(self) -> float:
         return float(self.fatigue_gate_value)
 
+    def _render_not_worn(self):
+        # Force all outputs to 0 and pause break logic
+        self.signal_ok = False
+        self.low_seconds = 0
+
+        self.focus_ema = 0.0
+        self.fatigue_ema = 0.0
+        self._last_hr = 0
+        self._last_spo2 = 0
+
+        self.focus_bar.setValue(0)
+        self.fatigue_bar.setValue(0)
+
+        self.focus_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(0.0)}; }}")
+        self.fatigue_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(0.0)}; }}")
+
+        self.hr_value.setText("0 bpm")
+        self.spo2_value.setText("0 %")
+        self.state_value.setText("🔴 Muse not worn")
+
+        # Charts still move (with zeros)
+        self.focus_hist.append(0.0)
+        self.hr_hist.append(0)
+        self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
+        self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
+
+        # Log zeros (as requested)
+        try:
+            self.logger.log(0.0, 0.0, 0, 0)
+        except Exception:
+            pass
+
     def update_metrics(self):
+        # --- READ MUSE
         try:
             m = self.brain.read_metrics()
-
-            # warm-up skip (avoid early weirdness)
-            self._warmup_seen += 1
-            if self._warmup_seen <= self._warmup_skip:
-                return
-
-            # stats
-            self.samples += 1
-            self.focus_sum += float(m.focus)
-
-            if m.heart_rate is not None:
-                self._last_hr = int(m.heart_rate)
-                self.hr_sum += int(m.heart_rate)
-                self.hr_samples += 1
-
-            if m.spo2 is not None:
-                self._last_spo2 = int(m.spo2)
-                self.spo2_sum += int(m.spo2)
-                self.spo2_samples += 1
-
-            # logging (never inject fake 0s)
-            log_hr = self._last_hr if self._last_hr is not None else 0
-            log_spo2 = self._last_spo2 if self._last_spo2 is not None else 0
-            self.logger.log(m.focus, m.fatigue, log_hr, log_spo2)
-
-            # EMA
-            a = float(self.ema_alpha)
-            self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
-            self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
-
-            # Break logic
-            now = time.time()
-            elapsed = now - self.start_ts
-            threshold = self._low_threshold()
-            fatigue_gate = self._fatigue_gate()
-
-            in_grace = elapsed < float(self.grace_s)
-            in_cooldown = (now - self.last_break_ts) < float(self.cooldown_s) if self.last_break_ts > 0 else False
-
-            low_and_fatigued = (self.focus_ema < threshold) and (self.fatigue_ema >= fatigue_gate)
-
-            if not in_grace and not in_cooldown:
-                self.low_seconds = self.low_seconds + 1 if low_and_fatigued else 0
-
-                if self.low_seconds >= int(self.low_required_s):
-                    self.low_seconds = 0
-                    self.last_break_ts = now
-                    self.breaks_triggered += 1
-
-                    show_break_popup(
-                        "Neurotempo",
-                        "Focus stayed low and fatigue is building. Take a 2–5 minute reset break."
-                    )
-            else:
-                self.low_seconds = 0
-
-            # Bars
-            focus_pct = int(max(0.0, min(1.0, self.focus_ema)) * 100)
-            fatigue_pct = int(max(0.0, min(1.0, self.fatigue_ema)) * 100)
-
-            self.focus_bar.setValue(focus_pct)
-            self.fatigue_bar.setValue(fatigue_pct)
-
-            self.focus_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}")
-            self.fatigue_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}")
-
-            # Vitals (keep original UI behavior, but safe for None)
-            self.hr_value.setText(f"{self._last_hr} bpm" if self._last_hr is not None else "— bpm")
-            self.spo2_value.setText(f"{self._last_spo2} %" if self._last_spo2 is not None else "— %")
-
-            # Status
-            if in_grace:
-                self.state_value.setText("⚪ Settling in…")
-            elif self.focus_ema >= 0.65:
-                self.state_value.setText("🟢 Keep working")
-            elif self.focus_ema >= 0.45:
-                self.state_value.setText("🟡 Take a breath")
-            else:
-                if in_cooldown:
-                    self.state_value.setText("🟠 Recovering (cooldown)")
-                else:
-                    self.state_value.setText(
-                        "🔴 Focus low + fatigue rising"
-                        if self.fatigue_ema >= fatigue_gate
-                        else "🔵 Low focus (not fatigued)"
-                    )
-
-            # Charts
-            self.focus_hist.append(float(m.focus))
-            self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
-
-            # HR chart: keep last-known value (no fake drops)
-            if self._last_hr is not None:
-                self.hr_hist.append(int(self._last_hr))
-            self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
-
-        except MuseNotReady as e:
-            self.state_value.setText("🔴 Muse not ready")
-            print("[Neurotempo] MuseNotReady in session:", repr(e))
+        except MuseNotReady:
+            self._render_not_worn()
+            return
         except Exception as e:
             print("[Neurotempo] Session update error:", repr(e))
+            return
+
+        # If brain layer is gating, treat zeros as "not worn"
+        if float(m.focus) == 0.0 and float(m.fatigue) == 0.0 and int(m.heart_rate or 0) == 0 and int(m.spo2 or 0) == 0:
+            self._render_not_worn()
+            return
+
+        self.signal_ok = True
+
+        # warm-up skip (avoid early weirdness)
+        self._warmup_seen += 1
+        if self._warmup_seen <= self._warmup_skip:
+            return
+
+        # stats
+        self.samples += 1
+        self.focus_sum += float(m.focus)
+
+        # vitals (store even if you later implement real values)
+        self._last_hr = int(m.heart_rate) if m.heart_rate is not None else self._last_hr
+        self._last_spo2 = int(m.spo2) if m.spo2 is not None else self._last_spo2
+
+        if m.heart_rate is not None:
+            self.hr_sum += int(m.heart_rate)
+            self.hr_samples += 1
+
+        if m.spo2 is not None:
+            self.spo2_sum += int(m.spo2)
+            self.spo2_samples += 1
+
+        # logging
+        self.logger.log(m.focus, m.fatigue, int(self._last_hr), int(self._last_spo2))
+
+        # EMA
+        a = float(self.ema_alpha)
+        self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
+        self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
+
+        # Break logic
+        now = time.time()
+        elapsed = now - self.start_ts
+        threshold = self._low_threshold()
+        fatigue_gate = self._fatigue_gate()
+
+        in_grace = elapsed < float(self.grace_s)
+        in_cooldown = (now - self.last_break_ts) < float(self.cooldown_s) if self.last_break_ts > 0 else False
+
+        low_and_fatigued = (self.focus_ema < threshold) and (self.fatigue_ema >= fatigue_gate)
+
+        if not in_grace and not in_cooldown:
+            self.low_seconds = self.low_seconds + 1 if low_and_fatigued else 0
+
+            if self.low_seconds >= int(self.low_required_s):
+                self.low_seconds = 0
+                self.last_break_ts = now
+                self.breaks_triggered += 1
+
+                show_break_popup(
+                    "Neurotempo",
+                    "Focus stayed low and fatigue is building. Take a 2–5 minute reset break."
+                )
+        else:
+            self.low_seconds = 0
+
+        # Bars
+        focus_pct = int(max(0.0, min(1.0, self.focus_ema)) * 100)
+        fatigue_pct = int(max(0.0, min(1.0, self.fatigue_ema)) * 100)
+
+        self.focus_bar.setValue(focus_pct)
+        self.fatigue_bar.setValue(fatigue_pct)
+
+        self.focus_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}")
+        self.fatigue_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}")
+
+        # Vitals: show numbers (zeros already handled above)
+        self.hr_value.setText(f"{int(self._last_hr)} bpm")
+        self.spo2_value.setText(f"{int(self._last_spo2)} %")
+
+        # Status (original logic)
+        if in_grace:
+            self.state_value.setText("⚪ Settling in…")
+        elif self.focus_ema >= 0.65:
+            self.state_value.setText("🟢 Keep working")
+        elif self.focus_ema >= 0.45:
+            self.state_value.setText("🟡 Take a breath")
+        else:
+            if in_cooldown:
+                self.state_value.setText("🟠 Recovering (cooldown)")
+            else:
+                self.state_value.setText(
+                    "🔴 Focus low + fatigue rising"
+                    if self.fatigue_ema >= fatigue_gate
+                    else "🔵 Low focus (not fatigued)"
+                )
+
+        # Charts
+        self.focus_hist.append(float(m.focus))
+        self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
+
+        self.hr_hist.append(int(self._last_hr))
+        self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
     def end_session(self):
         if self.timer.isActive():
