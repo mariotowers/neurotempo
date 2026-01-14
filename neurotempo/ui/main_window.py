@@ -1,3 +1,4 @@
+# neurotempo/ui/main_window.py
 import sys
 
 from PySide6.QtWidgets import (
@@ -154,7 +155,7 @@ class MainWindow(QMainWindow):
         self.brain = BrainFlowMuseBrain(
             device_id=None,
             timeout_s=15.0,
-            window_sec=2.0
+            window_sec=2.0,
         )
 
         # ==================================================
@@ -204,15 +205,23 @@ class MainWindow(QMainWindow):
             btn.setEnabled(enabled)
 
     # ==================================================
-    # Muse gate
+    # Muse gate (IMPORTANT FIX: don't start twice)
     # ==================================================
 
     def _ensure_muse(self) -> bool:
+        # ✅ If already connected/streaming, don't restart session
+        if getattr(self.brain, "_connected", False):
+            return True
+
         try:
             self.brain.start()
             return True
         except MuseNotReady as e:
             self.muse_blocker.set_message(str(e))
+            self.stack.setCurrentWidget(self.muse_blocker)
+            return False
+        except Exception as e:
+            self.muse_blocker.set_message(f"Muse error: {e}")
             self.stack.setCurrentWidget(self.muse_blocker)
             return False
 
