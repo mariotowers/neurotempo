@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
 )
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, QTimer
 from PySide6.QtGui import QPainterPath, QRegion, QGuiApplication
+
+from brainflow.board_shim import BoardShim  # noqa: F401
 
 from neurotempo.ui.style import APP_QSS
 from neurotempo.ui.titlebar import TitleBar
@@ -32,12 +34,9 @@ from neurotempo.ui.prefs import (
     forget_device_id,
 )
 
+from neurotempo.ui.muse_disconnect_dialog import MuseDisconnectDialog
 from neurotempo.brain.brainflow_muse import BrainFlowMuseBrain, MuseNotReady
 
-
-# ==================================================
-# Muse Not Ready Screen
-# ==================================================
 
 class MuseBlockerScreen(QWidget):
     def __init__(self, on_retry):
@@ -86,10 +85,6 @@ class MuseBlockerScreen(QWidget):
         self.msg.setText(text)
 
 
-# ==================================================
-# Main Window
-# ==================================================
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -97,7 +92,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Neurotempo")
         self.resize(980, 680)
 
-        # Frameless window
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowFlag(Qt.Tool, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -105,7 +99,6 @@ class MainWindow(QMainWindow):
         self._radius = 18
         self._shadow_margin = 22
 
-        # ---- Outer container
         outer = QWidget()
         outer.setAttribute(Qt.WA_TranslucentBackground, True)
 
@@ -118,7 +111,6 @@ class MainWindow(QMainWindow):
         )
         outer_layout.setSpacing(0)
 
-        # ---- Inner container
         self.container = QWidget()
         self.container.setObjectName("appContainer")
         self.container.setStyleSheet(f"""
@@ -138,7 +130,6 @@ class MainWindow(QMainWindow):
         container_layout.setContentsMargins(12, 12, 12, 12)
         container_layout.setSpacing(10)
 
-        # ---- Stack
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("""
             QStackedWidget {
@@ -148,17 +139,14 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # ---- Saved device
         saved_device = get_saved_device_id()
 
-        # ---- Muse backend
         self.brain = BrainFlowMuseBrain(
             device_id=saved_device,
             timeout_s=15.0,
             window_sec=2.0,
         )
 
-        # ---- Titlebar
         self.titlebar = TitleBar(
             self,
             "Neurotempo",
@@ -172,10 +160,6 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.container)
         self.setCentralWidget(outer)
 
-        # ==================================================
-        # Screens
-        # ==================================================
-
         self.device_select = DeviceSelectScreen(
             brain=self.brain,
             on_connected=self.on_device_selected,
@@ -184,9 +168,7 @@ class MainWindow(QMainWindow):
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
         self.muse_blocker = MuseBlockerScreen(on_retry=self.go_presession)
         self.presession = PreSessionScreen(brain=self.brain, on_start=self.go_calibration)
-        self.calibration = CalibrationScreen(
-            seconds=30, brain=self.brain, on_done=self.go_session
-        )
+        self.calibration = CalibrationScreen(seconds=30, brain=self.brain, on_done=self.go_session)
 
         self.settings = SettingsScreen(on_back=self.go_back_from_settings)
         self.summary = SummaryScreen(on_done=self.go_history)
@@ -213,7 +195,6 @@ class MainWindow(QMainWindow):
         ):
             self.stack.addWidget(w)
 
-        # ---- Initial route
         if saved_device:
             self.stack.setCurrentWidget(self.splash)
             self._set_splash_only_controls(True)
@@ -225,9 +206,11 @@ class MainWindow(QMainWindow):
 
         self._place_safely()
 
-    # ==================================================
-    # Splash-only controls
-    # ==================================================
+        # ✅ Watchdog state
+        self._disconnect_modal_open = False
+        self._last_data_count = None
+        self._stale_ticks = 0
+        self._start_connection_watchdog()
 
     def _set_splash_only_controls(self, enabled: bool):
         try:
@@ -235,15 +218,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ==================================================
-    # Device handling
-    # ==================================================
-
     def on_device_selected(self, device_id: str):
         save_device_id(device_id)
         self.brain.set_device_id(device_id)
         self.titlebar.set_device_connected(True)
-
         self.stack.setCurrentWidget(self.splash)
         self._set_splash_only_controls(True)
 
@@ -252,7 +230,6 @@ class MainWindow(QMainWindow):
             self.brain.stop()
         except Exception:
             pass
-
         self.stack.setCurrentWidget(self.device_select)
         self._set_splash_only_controls(False)
 
@@ -261,17 +238,11 @@ class MainWindow(QMainWindow):
             self.brain.stop()
         except Exception:
             pass
-
         forget_device_id()
         self.brain.set_device_id(None)
         self.titlebar.set_device_connected(False)
-
         self.stack.setCurrentWidget(self.device_select)
         self._set_splash_only_controls(False)
-
-    # ==================================================
-    # Muse gate
-    # ==================================================
 
     def _ensure_muse(self) -> bool:
         if getattr(self.brain, "_connected", False):
@@ -280,6 +251,8 @@ class MainWindow(QMainWindow):
         try:
             self.brain.start()
             self.titlebar.set_device_connected(True)
+            self._last_data_count = None
+            self._stale_ticks = 0
             return True
         except MuseNotReady as e:
             self.titlebar.set_device_connected(False)
@@ -294,9 +267,80 @@ class MainWindow(QMainWindow):
             self._set_splash_only_controls(False)
             return False
 
-    # ==================================================
-    # Navigation
-    # ==================================================
+    def _start_connection_watchdog(self):
+        self._conn_watch_timer = QTimer(self)
+        self._conn_watch_timer.setInterval(600)  # ✅ faster than 1s
+        self._conn_watch_timer.timeout.connect(self._watch_muse_connection)
+        self._conn_watch_timer.start()
+
+    def _watch_muse_connection(self):
+        if self._disconnect_modal_open:
+            return
+
+        if not getattr(self.brain, "_connected", False):
+            self._last_data_count = None
+            self._stale_ticks = 0
+            return
+
+        board = getattr(self.brain, "board", None)
+        if board is None:
+            self._last_data_count = None
+            self._stale_ticks = 0
+            return
+
+        try:
+            count = int(board.get_board_data_count())
+
+            if self._last_data_count is None:
+                self._last_data_count = count
+                self._stale_ticks = 0
+                return
+
+            if count <= self._last_data_count:
+                self._stale_ticks += 1
+            else:
+                self._stale_ticks = 0
+                self._last_data_count = count
+
+        except Exception:
+            self._stale_ticks += 1
+
+        # ✅ faster trigger (~1.2s)
+        if self._stale_ticks >= 2:
+            self._last_data_count = None
+            self._stale_ticks = 0
+            self._show_disconnect_modal()
+
+    def _show_disconnect_modal(self):
+        self._disconnect_modal_open = True
+
+        try:
+            self.titlebar.set_device_connected(False)
+        except Exception:
+            pass
+
+        try:
+            self.brain.stop()
+        except Exception:
+            pass
+
+        dlg = MuseDisconnectDialog(self, detail=None)
+        result = dlg.exec()
+        self._disconnect_modal_open = False
+
+        if result == MuseDisconnectDialog.ACTION_RETRY:
+            ok = self._ensure_muse()
+            if ok:
+                try:
+                    self.titlebar.set_device_connected(True)
+                except Exception:
+                    pass
+            else:
+                self.stack.setCurrentWidget(self.muse_blocker)
+                self._set_splash_only_controls(False)
+
+        elif result == MuseDisconnectDialog.ACTION_CHANGE:
+            self.go_device_select()
 
     def go_splash(self):
         self.stack.setCurrentWidget(self.splash)
@@ -353,10 +397,6 @@ class MainWindow(QMainWindow):
     def go_back_from_settings(self):
         self.go_splash()
 
-    # ==================================================
-    # Window shape & shutdown
-    # ==================================================
-
     def _place_safely(self):
         screen = QGuiApplication.primaryScreen()
         if screen:
@@ -380,10 +420,15 @@ class MainWindow(QMainWindow):
         self._apply_rounded_mask()
 
     def closeEvent(self, event):
-        # ✅ stop BLE scan worker if alive
         try:
             if self.device_select and hasattr(self.device_select, "_stop_worker"):
                 self.device_select._stop_worker()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "_conn_watch_timer") and self._conn_watch_timer:
+                self._conn_watch_timer.stop()
         except Exception:
             pass
 
@@ -394,10 +439,6 @@ class MainWindow(QMainWindow):
 
         super().closeEvent(event)
 
-
-# ==================================================
-# App entry
-# ==================================================
 
 def launch_app():
     app = QApplication(sys.argv)
