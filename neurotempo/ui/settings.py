@@ -1,3 +1,5 @@
+# neurotempo/ui/settings.py
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QFrame, QHBoxLayout, QPushButton,
     QFormLayout, QDoubleSpinBox, QSpinBox
@@ -20,9 +22,10 @@ def card() -> QFrame:
 
 
 class SettingsScreen(QWidget):
-    def __init__(self, on_back):
+    def __init__(self, on_back, on_forget_device=None):
         super().__init__()
         self.on_back = on_back
+        self._on_forget_device = on_forget_device
         self.store = SettingsStore()
         self.settings = self.store.load()
 
@@ -51,9 +54,45 @@ class SettingsScreen(QWidget):
         header.addWidget(back, 0, Qt.AlignRight)
         root.addLayout(header)
 
-        subtitle = QLabel("Tune break sensitivity for real EEG. Once a session begins, settings are locked to ensure consistent and reliable EEG measurements.")
+        subtitle = QLabel(
+            "Tune break sensitivity for real EEG. Once a session begins, settings are locked "
+            "to ensure consistent and reliable EEG measurements."
+        )
         subtitle.setObjectName("muted")
         root.addWidget(subtitle)
+
+        if callable(self._on_forget_device):
+            dev = card()
+            root.addWidget(dev)
+
+            dev_wrap = QVBoxLayout(dev)
+            dev_wrap.setContentsMargins(16, 14, 16, 14)
+            dev_wrap.setSpacing(10)
+
+            dev_title = QLabel("Device")
+            dev_title.setStyleSheet("font-size: 16px; font-weight: 850;")
+            dev_wrap.addWidget(dev_title)
+
+            dev_sub = QLabel("Forget the saved Muse to reconnect or switch headsets.")
+            dev_sub.setWordWrap(True)
+            dev_sub.setStyleSheet("color: rgba(231,238,247,0.72); font-size: 12px;")
+            dev_wrap.addWidget(dev_sub)
+
+            forget = QPushButton("Forget saved device")
+            forget.setCursor(Qt.PointingHandCursor)
+            forget.clicked.connect(self._forget_device)
+            forget.setStyleSheet("""
+                QPushButton {
+                    background: rgba(239,68,68,0.14);
+                    border: 1px solid rgba(239,68,68,0.28);
+                    border-radius: 12px;
+                    padding: 10px 14px;
+                    font-weight: 850;
+                }
+                QPushButton:hover { background: rgba(239,68,68,0.20); }
+                QPushButton:pressed { background: rgba(239,68,68,0.26); }
+            """)
+            dev_wrap.addWidget(forget, 0, Qt.AlignLeft)
 
         c = card()
         root.addWidget(c)
@@ -116,6 +155,10 @@ class SettingsScreen(QWidget):
 
         self._load_into_ui(self.settings)
 
+    def _forget_device(self):
+        if callable(self._on_forget_device):
+            self._on_forget_device()
+
     def _load_into_ui(self, s: AppSettings):
         self.ema_alpha.setValue(float(s.ema_alpha))
         self.grace_s.setValue(int(s.grace_s))
@@ -137,9 +180,10 @@ class SettingsScreen(QWidget):
             threshold_min=float(self.threshold_min.value()),
             threshold_max=float(self.threshold_max.value()),
         )
+
     def get_settings(self) -> AppSettings:
         return self.settings
-    
+
     def _save(self):
         self.settings = self._read_from_ui()
         self.store.save(self.settings)

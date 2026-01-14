@@ -1,3 +1,5 @@
+#neurotempo/brain/brainflow_muse.py
+
 from __future__ import annotations
 
 from collections import deque
@@ -38,8 +40,8 @@ class BrainFlowMuseBrain(BrainAPI):
         timeout_s: float = 15.0,
         window_sec: float = 2.0,
         smooth_n: int = 8,
-        ppg_window_sec: float = 8.0,              # needs a longer window for stable HR/SpO2
-        hr_band_hz: Tuple[float, float] = (0.8, 3.0),  # ~48..180 bpm
+        ppg_window_sec: float = 8.0,
+        hr_band_hz: Tuple[float, float] = (0.8, 3.0),
     ):
         self.device_id = device_id
         self.timeout_s = float(timeout_s)
@@ -66,18 +68,16 @@ class BrainFlowMuseBrain(BrainAPI):
         self._focus_hist = deque(maxlen=self.smooth_n)
         self._fatigue_hist = deque(maxlen=self.smooth_n)
 
-        # ✅ wearing/contact state (used by UI)
         self.last_valid_eeg_count: int = 0
         self.last_worn: bool = False
 
-    # -----------------------
-    # Lifecycle
-    # -----------------------
+    # ✅ NEW
+    def set_device_id(self, device_id: Optional[str]):
+        self.device_id = device_id
 
     def start(self):
         self.params = BrainFlowInputParams()
         if self.device_id:
-            # BrainFlow uses mac_address field for Muse identifier in many setups
             self.params.mac_address = self.device_id
         self.params.timeout = int(self.timeout_s)
 
@@ -86,17 +86,13 @@ class BrainFlowMuseBrain(BrainAPI):
         try:
             self.board.prepare_session()
 
-            # ✅ enable PPG streaming on Muse 2 (turns red light on)
-            # Must be before start_stream()
             try:
                 self.board.config_board("p50")
             except Exception:
-                # some builds/devices may not accept it
                 pass
 
             self.board.start_stream(45000)
 
-            # EEG metadata
             try:
                 self.fs = int(BoardShim.get_sampling_rate(self.board_id))
             except Exception:
@@ -110,7 +106,6 @@ class BrainFlowMuseBrain(BrainAPI):
             if not self.eeg_channels:
                 raise MuseNotReady("No EEG channels")
 
-            # PPG metadata (ANCILLARY_PRESET)
             try:
                 self.ppg_channels = list(
                     BoardShim.get_ppg_channels(self.board_id, BrainFlowPresets.ANCILLARY_PRESET)
@@ -150,39 +145,18 @@ class BrainFlowMuseBrain(BrainAPI):
             self.last_valid_eeg_count = 0
             self.last_worn = False
 
-    # -----------------------
-    # Wearing / contact logic
-    # -----------------------
-
     def _channel_valid_mask(self, data: np.ndarray) -> np.ndarray:
-        """
-        Per-channel validity based on EEG std range.
-        """
         eeg = data[self.eeg_channels, :]
         stds = np.std(eeg, axis=1)
-
-        # "reasonable" EEG uV-ish range
         return (stds > 8.0) & (stds < 250.0)
 
     def _is_worn(self, data: np.ndarray) -> bool:
-        """
-        ✅ Worn iff at least ONE EEG channel valid.
-        Not worn iff ALL EEG channels invalid.
-        """
         valid = self._channel_valid_mask(data)
         self.last_valid_eeg_count = int(np.sum(valid))
         self.last_worn = self.last_valid_eeg_count > 0
         return self.last_worn
 
-    # -----------------------
-    # Helpers
-    # -----------------------
-
     def _get_current_data(self, n: int, preset=None) -> Optional[np.ndarray]:
-        """
-        BrainFlow python signature differs by version.
-        Try both ways safely.
-        """
         if not self.board:
             return None
 
@@ -199,9 +173,6 @@ class BrainFlowMuseBrain(BrainAPI):
             return None
 
     def _estimate_hr_from_ppg(self, sig: np.ndarray, fs: int) -> int:
-        """
-        Simple HR estimate using FFT peak in hr_band_hz.
-        """
         if sig.size < int(2 * fs):
             return 0
 
@@ -226,35 +197,27 @@ class BrainFlowMuseBrain(BrainAPI):
             return 0
         return hr
 
-    # -----------------------
-    # Metrics
-    # -----------------------
-
     def read_metrics(self) -> BrainMetrics:
         if not self._connected or not self.board:
             raise MuseNotReady("Muse not connected")
 
-        # ---- EEG window
         n = int(self.window_sec * self.fs)
         data = self._get_current_data(n)
 
         if data is None or data.shape[1] < n:
             return BrainMetrics(0.0, 0.0, 0, 0)
 
-        # ✅ Not worn -> zeros ONLY when ALL EEG channels invalid
         if not self._is_worn(data):
             self._focus_hist.clear()
             self._fatigue_hist.clear()
             return BrainMetrics(0.0, 0.0, 0, 0)
 
-        # ---- EEG band powers -> focus/fatigue
         rel_powers, _ = DataFilter.get_avg_band_powers(
             data,
             self.eeg_channels,
             self.fs,
             True
         )
-        # delta, theta, alpha, beta, gamma
         _, theta, alpha, beta, _ = rel_powers
 
         focus = beta / max(alpha + theta, 1e-6)
@@ -269,7 +232,6 @@ class BrainFlowMuseBrain(BrainAPI):
         focus_s = float(np.mean(self._focus_hist))
         fatigue_s = float(np.mean(self._fatigue_hist))
 
-        # ---- PPG: HR + SpO2 (if available)
         hr = 0
         spo2 = 0
 

@@ -25,6 +25,9 @@ from neurotempo.ui.summary import SummaryScreen
 from neurotempo.ui.history import SessionHistoryScreen
 from neurotempo.ui.session_detail import SessionDetailScreen
 
+from neurotempo.ui.device_select import DeviceSelectScreen
+from neurotempo.ui.prefs import get_saved_device_id, save_device_id, forget_device_id
+
 from neurotempo.brain.brainflow_muse import BrainFlowMuseBrain, MuseNotReady
 
 
@@ -141,7 +144,24 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        self.titlebar = TitleBar(self, "Neurotempo", on_settings=self.go_settings)
+        # ---- Saved device
+        saved = get_saved_device_id()
+
+        # ---- Muse backend
+        self.brain = BrainFlowMuseBrain(
+            device_id=saved,
+            timeout_s=15.0,
+            window_sec=2.0,
+        )
+
+        # ---- Titlebar callbacks
+        self.titlebar = TitleBar(
+            self,
+            "Neurotempo",
+            on_settings=self.go_settings,
+            on_change_device=self.go_device_select,
+            on_forget_device=self.forget_device_and_reselect,
+        )
 
         container_layout.addWidget(self.titlebar)
         container_layout.addWidget(self.stack)
@@ -149,25 +169,21 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(outer)
 
         # ==================================================
-        # REAL Muse backend (NO enable_logs)
-        # ==================================================
-
-        self.brain = BrainFlowMuseBrain(
-            device_id=None,
-            timeout_s=15.0,
-            window_sec=2.0,
-        )
-
-        # ==================================================
         # Screens
         # ==================================================
+
+        self.device_select = DeviceSelectScreen(brain=self.brain, on_connected=self.on_device_selected)
 
         self.splash = SplashDisclaimer(on_continue=self.go_presession)
         self.muse_blocker = MuseBlockerScreen(on_retry=self.go_presession)
         self.presession = PreSessionScreen(brain=self.brain, on_start=self.go_calibration)
         self.calibration = CalibrationScreen(seconds=30, brain=self.brain, on_done=self.go_session)
 
-        self.settings = SettingsScreen(on_back=self.go_back_from_settings)
+        self.settings = SettingsScreen(
+            on_back=self.go_back_from_settings,
+            on_forget_device=self.forget_device_and_reselect,
+        )
+
         self.summary = SummaryScreen(on_done=self.go_history)
 
         self.history = SessionHistoryScreen(
@@ -180,6 +196,7 @@ class MainWindow(QMainWindow):
         self.session = None
 
         for w in (
+            self.device_select,
             self.splash,
             self.muse_blocker,
             self.presession,
@@ -191,38 +208,64 @@ class MainWindow(QMainWindow):
         ):
             self.stack.addWidget(w)
 
-        self.stack.setCurrentWidget(self.splash)
-        self._set_settings_enabled(True)
+        # ---- Initial route + icon state
+        if saved:
+            self.stack.setCurrentWidget(self.splash)
+            self._set_splash_only_controls(True)
+            self.titlebar.set_device_connected(True)
+        else:
+            self.stack.setCurrentWidget(self.device_select)
+            self._set_splash_only_controls(False)
+            self.titlebar.set_device_connected(False)
+
         self._place_safely()
 
     # ==================================================
-    # Settings gating
+    # Splash-only controls (Muse + Settings)
     # ==================================================
 
-    def _set_settings_enabled(self, enabled: bool):
-        btn = getattr(self.titlebar, "settings_btn", None)
-        if btn:
-            btn.setEnabled(enabled)
+    def _set_splash_only_controls(self, enabled: bool):
+        try:
+            self.titlebar.set_splash_buttons_enabled(enabled)
+        except Exception:
+            pass
+
+    # ==================================================
+    # Device selection
+    # ==================================================
+
+    def on_device_selected(self, device_id: str):
+        save_device_id(device_id)
+        self.brain.set_device_id(device_id)
+        self.titlebar.set_device_connected(True)
+
+        self.stack.setCurrentWidget(self.splash)
+        self._set_splash_only_controls(True)
 
     # ==================================================
     # Muse gate (IMPORTANT FIX: don't start twice)
     # ==================================================
 
     def _ensure_muse(self) -> bool:
-        # ✅ If already connected/streaming, don't restart session
         if getattr(self.brain, "_connected", False):
+            self.titlebar.set_device_connected(True)
             return True
 
         try:
             self.brain.start()
+            self.titlebar.set_device_connected(True)
             return True
         except MuseNotReady as e:
+            self.titlebar.set_device_connected(False)
             self.muse_blocker.set_message(str(e))
             self.stack.setCurrentWidget(self.muse_blocker)
+            self._set_splash_only_controls(False)
             return False
         except Exception as e:
+            self.titlebar.set_device_connected(False)
             self.muse_blocker.set_message(f"Muse error: {e}")
             self.stack.setCurrentWidget(self.muse_blocker)
+            self._set_splash_only_controls(False)
             return False
 
     # ==================================================
@@ -230,23 +273,56 @@ class MainWindow(QMainWindow):
     # ==================================================
 
     def go_splash(self):
-        self._set_settings_enabled(True)
         self.stack.setCurrentWidget(self.splash)
+        self._set_splash_only_controls(True)
+
+    def go_device_select(self):
+        # Only reachable from Splash titlebar menu
+        try:
+            self.brain.stop()
+        except Exception:
+            pass
+
+        self.stack.setCurrentWidget(self.device_select)
+        self._set_splash_only_controls(False)
+
+        try:
+            self.device_select.refresh()
+        except Exception:
+            pass
+
+    def forget_device_and_reselect(self):
+        try:
+            self.brain.stop()
+        except Exception:
+            pass
+
+        forget_device_id()
+        self.brain.set_device_id(None)
+        self.titlebar.set_device_connected(False)
+
+        self.stack.setCurrentWidget(self.device_select)
+        self._set_splash_only_controls(False)
+
+        try:
+            self.device_select.refresh()
+        except Exception:
+            pass
 
     def go_presession(self, *_):
-        self._set_settings_enabled(False)
+        self._set_splash_only_controls(False)
         if not self._ensure_muse():
             return
         self.stack.setCurrentWidget(self.presession)
 
     def go_calibration(self):
-        self._set_settings_enabled(False)
+        self._set_splash_only_controls(False)
         if not self._ensure_muse():
             return
         self.stack.setCurrentWidget(self.calibration)
 
     def go_session(self, baseline_focus: float):
-        self._set_settings_enabled(False)
+        self._set_splash_only_controls(False)
 
         if self.session:
             self.stack.removeWidget(self.session)
@@ -267,6 +343,7 @@ class MainWindow(QMainWindow):
     def go_summary(self, summary: dict):
         self.summary.set_summary(summary)
         self.stack.setCurrentWidget(self.summary)
+        self._set_splash_only_controls(False)
 
     def go_history(self, *_):
         try:
@@ -274,17 +351,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.stack.setCurrentWidget(self.history)
+        self._set_splash_only_controls(False)
 
     def open_session_detail(self, item: dict):
         self.detail.set_record(item)
         self.stack.setCurrentWidget(self.detail)
+        self._set_splash_only_controls(False)
 
     def go_settings(self):
-        if self.stack.currentWidget() is self.splash:
-            self.stack.setCurrentWidget(self.settings)
+        # Only reachable from Splash
+        self.stack.setCurrentWidget(self.settings)
+        self._set_splash_only_controls(False)
 
     def go_back_from_settings(self):
-        self.stack.setCurrentWidget(self.splash)
+        self.go_splash()
 
     # ==================================================
     # Window shape
