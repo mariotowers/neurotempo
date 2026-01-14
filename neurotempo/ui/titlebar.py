@@ -29,7 +29,7 @@ class TitleBar(QWidget):
 
         # Device menu icon
         self.device_btn = QToolButton()
-        self.device_btn.setText("⦿")
+        self.device_btn.setText("⦿")  # fine for now; SVG later if you want ultra-clean
         self.device_btn.setToolTip("Muse device")
         self.device_btn.setFixedSize(36, 30)
         self.device_btn.setCursor(Qt.PointingHandCursor)
@@ -117,16 +117,20 @@ class TitleBar(QWidget):
 
     def _apply_device_style_connected(self, connected: bool):
         if connected:
+            # ✅ Subtle, calm green (Apple-like), NOT neon success green
             self.device_btn.setStyleSheet("""
                 QToolButton {
-                    color: rgba(34,197,94,0.95);
-                    background: rgba(34,197,94,0.10);
-                    border: 1px solid rgba(34,197,94,0.28);
+                    color: rgba(120, 190, 160, 0.85);
+                    background: rgba(120, 190, 160, 0.06);
+                    border: 1px solid rgba(120, 190, 160, 0.30);
                     border-radius: 10px;
                     font-weight: 900;
+                    padding: 0px;
                 }
-                QToolButton:hover { background: rgba(34,197,94,0.16); }
-                QToolButton:pressed { background: rgba(34,197,94,0.22); }
+                /* ✅ remove the dropdown/menu indicator (the "check") */
+                QToolButton::menu-indicator { image: none; width: 0px; }
+                QToolButton:hover { background: rgba(120, 190, 160, 0.10); }
+                QToolButton:pressed { background: rgba(120, 190, 160, 0.14); }
                 QToolButton:disabled { opacity: 0.40; }
             """)
         else:
@@ -137,7 +141,10 @@ class TitleBar(QWidget):
                     border: 1px solid rgba(255,255,255,0.10);
                     border-radius: 10px;
                     font-weight: 900;
+                    padding: 0px;
                 }
+                /* ✅ remove the dropdown/menu indicator (the "check") */
+                QToolButton::menu-indicator { image: none; width: 0px; }
                 QToolButton:hover { background: rgba(255,255,255,0.10); }
                 QToolButton:pressed { background: rgba(255,255,255,0.14); }
                 QToolButton:disabled { opacity: 0.35; }

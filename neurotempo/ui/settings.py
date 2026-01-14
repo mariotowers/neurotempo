@@ -13,29 +13,49 @@ def card() -> QFrame:
     f = QFrame()
     f.setStyleSheet("""
         QFrame {
-            background: rgba(255,255,255,0.05);
+            background: rgba(255,255,255,0.04);
             border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 16px;
+            border-radius: 18px;
         }
     """)
     return f
 
 
+def styled_spinbox(sb):
+    sb.setStyleSheet("""
+        QSpinBox, QDoubleSpinBox {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 10px;
+            padding: 6px 8px;
+            min-width: 90px;
+        }
+        QSpinBox:hover, QDoubleSpinBox:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        QSpinBox:focus, QDoubleSpinBox:focus {
+            border: 1px solid rgba(120,190,160,0.45);
+            background: rgba(120,190,160,0.06);
+        }
+    """)
+    return sb
+
+
 class SettingsScreen(QWidget):
-    def __init__(self, on_back, on_forget_device=None):
+    def __init__(self, on_back):
         super().__init__()
         self.on_back = on_back
-        self._on_forget_device = on_forget_device
         self.store = SettingsStore()
         self.settings = self.store.load()
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 20)
-        root.setSpacing(12)
+        root.setContentsMargins(24, 22, 24, 22)
+        root.setSpacing(14)
 
+        # ── Header
         header = QHBoxLayout()
         title = QLabel("Settings")
-        title.setStyleSheet("font-size: 24px; font-weight: 800;")
+        title.setStyleSheet("font-size: 26px; font-weight: 800;")
         header.addWidget(title, 1)
 
         back = QPushButton("Back")
@@ -46,7 +66,7 @@ class SettingsScreen(QWidget):
                 background: rgba(255,255,255,0.08);
                 border: 1px solid rgba(255,255,255,0.14);
                 border-radius: 12px;
-                padding: 10px 14px;
+                padding: 10px 16px;
                 font-weight: 750;
             }
             QPushButton:hover { background: rgba(255,255,255,0.12); }
@@ -55,93 +75,101 @@ class SettingsScreen(QWidget):
         root.addLayout(header)
 
         subtitle = QLabel(
-            "Tune break sensitivity for real EEG. Once a session begins, settings are locked "
-            "to ensure consistent and reliable EEG measurements."
+            "Adjust how Neurotempo responds to real EEG signals. "
+            "Once a session begins, settings are locked to ensure consistent measurements."
         )
-        subtitle.setObjectName("muted")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: rgba(231,238,247,0.70); font-size: 13px;")
         root.addWidget(subtitle)
 
-        if callable(self._on_forget_device):
-            dev = card()
-            root.addWidget(dev)
-
-            dev_wrap = QVBoxLayout(dev)
-            dev_wrap.setContentsMargins(16, 14, 16, 14)
-            dev_wrap.setSpacing(10)
-
-            dev_title = QLabel("Device")
-            dev_title.setStyleSheet("font-size: 16px; font-weight: 850;")
-            dev_wrap.addWidget(dev_title)
-
-            dev_sub = QLabel("Forget the saved Muse to reconnect or switch headsets.")
-            dev_sub.setWordWrap(True)
-            dev_sub.setStyleSheet("color: rgba(231,238,247,0.72); font-size: 12px;")
-            dev_wrap.addWidget(dev_sub)
-
-            forget = QPushButton("Forget saved device")
-            forget.setCursor(Qt.PointingHandCursor)
-            forget.clicked.connect(self._forget_device)
-            forget.setStyleSheet("""
-                QPushButton {
-                    background: rgba(239,68,68,0.14);
-                    border: 1px solid rgba(239,68,68,0.28);
-                    border-radius: 12px;
-                    padding: 10px 14px;
-                    font-weight: 850;
-                }
-                QPushButton:hover { background: rgba(239,68,68,0.20); }
-                QPushButton:pressed { background: rgba(239,68,68,0.26); }
-            """)
-            dev_wrap.addWidget(forget, 0, Qt.AlignLeft)
-
+        # ── Settings Card
         c = card()
         root.addWidget(c)
 
         wrap = QVBoxLayout(c)
-        wrap.setContentsMargins(16, 14, 16, 14)
+        wrap.setContentsMargins(18, 16, 18, 18)
+        wrap.setSpacing(14)
+
+        section = QLabel("EEG Sensitivity")
+        section.setStyleSheet("font-size: 16px; font-weight: 850;")
+        wrap.addWidget(section)
+
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background: rgba(255,255,255,0.06);")
+        wrap.addWidget(divider)
 
         form = QFormLayout()
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(12)
+        form.setHorizontalSpacing(22)
+        form.setVerticalSpacing(14)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         wrap.addLayout(form)
 
-        self.ema_alpha = QDoubleSpinBox(); self.ema_alpha.setRange(0.05, 0.35); self.ema_alpha.setSingleStep(0.01); self.ema_alpha.setDecimals(2)
-        self.grace_s = QSpinBox(); self.grace_s.setRange(0, 600); self.grace_s.setSingleStep(15)
-        self.low_required_s = QSpinBox(); self.low_required_s.setRange(5, 120); self.low_required_s.setSingleStep(5)
-        self.cooldown_s = QSpinBox(); self.cooldown_s.setRange(60, 3600); self.cooldown_s.setSingleStep(30)
-        self.fatigue_gate = QDoubleSpinBox(); self.fatigue_gate.setRange(0.0, 1.0); self.fatigue_gate.setSingleStep(0.05); self.fatigue_gate.setDecimals(2)
+        # ── Controls
+        self.ema_alpha = styled_spinbox(QDoubleSpinBox())
+        self.ema_alpha.setRange(0.05, 0.35)
+        self.ema_alpha.setSingleStep(0.01)
+        self.ema_alpha.setDecimals(2)
 
-        self.threshold_multiplier = QDoubleSpinBox(); self.threshold_multiplier.setRange(0.50, 0.90); self.threshold_multiplier.setSingleStep(0.01); self.threshold_multiplier.setDecimals(2)
-        self.threshold_min = QDoubleSpinBox(); self.threshold_min.setRange(0.10, 0.60); self.threshold_min.setSingleStep(0.01); self.threshold_min.setDecimals(2)
-        self.threshold_max = QDoubleSpinBox(); self.threshold_max.setRange(0.20, 0.90); self.threshold_max.setSingleStep(0.01); self.threshold_max.setDecimals(2)
+        self.grace_s = styled_spinbox(QSpinBox())
+        self.grace_s.setRange(0, 600)
+        self.grace_s.setSingleStep(15)
 
-        form.addRow("EMA smoothing (alpha)", self.ema_alpha)
+        self.low_required_s = styled_spinbox(QSpinBox())
+        self.low_required_s.setRange(5, 120)
+        self.low_required_s.setSingleStep(5)
+
+        self.cooldown_s = styled_spinbox(QSpinBox())
+        self.cooldown_s.setRange(60, 3600)
+        self.cooldown_s.setSingleStep(30)
+
+        self.fatigue_gate = styled_spinbox(QDoubleSpinBox())
+        self.fatigue_gate.setRange(0.0, 1.0)
+        self.fatigue_gate.setSingleStep(0.05)
+        self.fatigue_gate.setDecimals(2)
+
+        self.threshold_multiplier = styled_spinbox(QDoubleSpinBox())
+        self.threshold_multiplier.setRange(0.50, 0.90)
+        self.threshold_multiplier.setSingleStep(0.01)
+        self.threshold_multiplier.setDecimals(2)
+
+        self.threshold_min = styled_spinbox(QDoubleSpinBox())
+        self.threshold_min.setRange(0.10, 0.60)
+        self.threshold_min.setSingleStep(0.01)
+        self.threshold_min.setDecimals(2)
+
+        self.threshold_max = styled_spinbox(QDoubleSpinBox())
+        self.threshold_max.setRange(0.20, 0.90)
+        self.threshold_max.setSingleStep(0.01)
+        self.threshold_max.setDecimals(2)
+
+        form.addRow("EMA smoothing", self.ema_alpha)
         form.addRow("Grace period (sec)", self.grace_s)
         form.addRow("Sustained low required (sec)", self.low_required_s)
         form.addRow("Cooldown after popup (sec)", self.cooldown_s)
-        form.addRow("Fatigue gate (0..1)", self.fatigue_gate)
+        form.addRow("Fatigue gate (0–1)", self.fatigue_gate)
         form.addRow("Threshold multiplier", self.threshold_multiplier)
         form.addRow("Threshold min", self.threshold_min)
         form.addRow("Threshold max", self.threshold_max)
 
+        # ── Footer buttons
         btns = QHBoxLayout()
         btns.addStretch(1)
 
         reset = QPushButton("Reset defaults")
-        reset.setCursor(Qt.PointingHandCursor)
         reset.clicked.connect(self._reset)
 
         save = QPushButton("Save")
-        save.setCursor(Qt.PointingHandCursor)
         save.clicked.connect(self._save)
 
         for b in (reset, save):
+            b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet("""
                 QPushButton {
                     background: rgba(255,255,255,0.10);
                     border: 1px solid rgba(255,255,255,0.18);
                     border-radius: 12px;
-                    padding: 10px 14px;
+                    padding: 10px 16px;
                     font-weight: 800;
                 }
                 QPushButton:hover { background: rgba(255,255,255,0.14); }
@@ -150,15 +178,12 @@ class SettingsScreen(QWidget):
 
         btns.addWidget(reset)
         btns.addWidget(save)
-        wrap.addSpacing(10)
+        wrap.addSpacing(6)
         wrap.addLayout(btns)
 
         self._load_into_ui(self.settings)
 
-    def _forget_device(self):
-        if callable(self._on_forget_device):
-            self._on_forget_device()
-
+    # ── Data handling (unchanged)
     def _load_into_ui(self, s: AppSettings):
         self.ema_alpha.setValue(float(s.ema_alpha))
         self.grace_s.setValue(int(s.grace_s))

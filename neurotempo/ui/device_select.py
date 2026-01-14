@@ -24,6 +24,7 @@ class DeviceSelectScreen(QWidget):
         self.brain = brain
         self.on_connected = on_connected
         self.worker: MuseScanWorker | None = None
+        self._first_show = True
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
@@ -80,7 +81,7 @@ class DeviceSelectScreen(QWidget):
                 QPushButton:disabled { opacity: 0.40; }
             """)
 
-        self.status = QLabel("")
+        self.status = QLabel("Ready to scan.")
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setStyleSheet("color: rgba(231,238,247,0.70); font-size: 12px;")
 
@@ -96,20 +97,50 @@ class DeviceSelectScreen(QWidget):
         root.addLayout(btn_row)
         root.addWidget(self.status)
 
-        self.refresh()
+        # ✅ IMPORTANT: DO NOT auto-scan here.
+        # We scan only when the screen is actually shown.
 
+    # -----------------------
+    # Thread safety
+    # -----------------------
+    def _stop_worker(self):
+        if self.worker and self.worker.isRunning():
+            try:
+                self.worker.cancel()
+            except Exception:
+                pass
+            self.worker.quit()
+            self.worker.wait(1200)
+        self.worker = None
+
+    def hideEvent(self, event):
+        self._stop_worker()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Auto-scan the first time this screen is shown
+        if self._first_show:
+            self._first_show = False
+            self.refresh()
+
+    # -----------------------
+    # UI logic
+    # -----------------------
     def _on_selection(self):
         self.connect_btn.setEnabled(self.list.currentItem() is not None)
 
     def refresh(self):
+        self._stop_worker()
+
         self.status.setText("Scanning nearby Muse…")
         self.list.clear()
         self.connect_btn.setEnabled(False)
 
-        if self.worker and self.worker.isRunning():
-            return
-
         self.worker = MuseScanWorker(timeout_s=4.0)
+        # parent it so it won’t be GC’d unexpectedly
+        self.worker.setParent(self)
+
         self.worker.result.connect(self._on_scan_result)
         self.worker.error.connect(lambda msg: self.status.setText(f"Scan error: {msg}"))
         self.worker.start()
@@ -146,5 +177,6 @@ class DeviceSelectScreen(QWidget):
             self.status.setText("Selected device has no address.")
             return
 
+        self._stop_worker()  # stop scan before switching screens
         self.brain.set_device_id(mac)
         self.on_connected(mac)
