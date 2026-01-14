@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections import deque
 from typing import Optional, Tuple
 
@@ -25,7 +24,12 @@ class BrainFlowMuseBrain(BrainAPI):
     Muse 2 backend:
     - EEG focus/fatigue from band powers
     - PPG HR (estimated) + SpO2 via BrainFlow get_oxygen_level
-    - If signal not valid (not worn): returns zeros (focus/fatigue/hr/spo2)
+    - If NOT WORN: returns zeros (focus/fatigue/hr/spo2)
+
+    ✅ UPDATE:
+    - "Not worn" triggers ONLY when ALL EEG channels are invalid.
+    - If at least ONE EEG channel is valid, we consider it worn.
+    - Exposes: self.last_worn and self.last_valid_eeg_count for the UI.
     """
 
     def __init__(
@@ -62,6 +66,10 @@ class BrainFlowMuseBrain(BrainAPI):
         self._focus_hist = deque(maxlen=self.smooth_n)
         self._fatigue_hist = deque(maxlen=self.smooth_n)
 
+        # ✅ wearing/contact state (used by UI)
+        self.last_valid_eeg_count: int = 0
+        self.last_worn: bool = False
+
     # -----------------------
     # Lifecycle
     # -----------------------
@@ -78,13 +86,12 @@ class BrainFlowMuseBrain(BrainAPI):
         try:
             self.board.prepare_session()
 
-            # ✅ IMPORTANT: enable PPG streaming on Muse 2 (turns red light on)
+            # ✅ enable PPG streaming on Muse 2 (turns red light on)
             # Must be before start_stream()
             try:
                 self.board.config_board("p50")
             except Exception:
-                # If a given BrainFlow build/device doesn't accept it, continue gracefully.
-                # (But then PPG may not be available.)
+                # some builds/devices may not accept it
                 pass
 
             self.board.start_stream(45000)
@@ -140,27 +147,35 @@ class BrainFlowMuseBrain(BrainAPI):
             self._connected = False
             self._focus_hist.clear()
             self._fatigue_hist.clear()
+            self.last_valid_eeg_count = 0
+            self.last_worn = False
 
     # -----------------------
-    # Signal validity
+    # Wearing / contact logic
     # -----------------------
 
-    def _signal_is_valid(self, data: np.ndarray) -> bool:
+    def _channel_valid_mask(self, data: np.ndarray) -> np.ndarray:
         """
-        Your current logic (works well):
-        Muse not worn -> EEG std either too low or too high.
+        Per-channel validity based on EEG std range.
         """
         eeg = data[self.eeg_channels, :]
         stds = np.std(eeg, axis=1)
 
-        # "reasonable" EEG uV range
-        valid = (stds > 8.0) & (stds < 250.0)
+        # "reasonable" EEG uV-ish range
+        return (stds > 8.0) & (stds < 250.0)
 
-        # require most electrodes to be valid
-        return int(np.sum(valid)) >= max(1, len(self.eeg_channels) - 1)
+    def _is_worn(self, data: np.ndarray) -> bool:
+        """
+        ✅ Worn iff at least ONE EEG channel valid.
+        Not worn iff ALL EEG channels invalid.
+        """
+        valid = self._channel_valid_mask(data)
+        self.last_valid_eeg_count = int(np.sum(valid))
+        self.last_worn = self.last_valid_eeg_count > 0
+        return self.last_worn
 
     # -----------------------
-    # PPG helpers
+    # Helpers
     # -----------------------
 
     def _get_current_data(self, n: int, preset=None) -> Optional[np.ndarray]:
@@ -174,10 +189,8 @@ class BrainFlowMuseBrain(BrainAPI):
         try:
             if preset is None:
                 return self.board.get_current_board_data(n)
-            # newer versions support preset kw
             return self.board.get_current_board_data(n, preset=preset)
         except TypeError:
-            # some versions accept preset as positional
             try:
                 return self.board.get_current_board_data(n, preset)
             except Exception:
@@ -187,10 +200,7 @@ class BrainFlowMuseBrain(BrainAPI):
 
     def _estimate_hr_from_ppg(self, sig: np.ndarray, fs: int) -> int:
         """
-        Simple HR estimate:
-        - detrend (remove mean)
-        - FFT
-        - peak freq in hr_band_hz
+        Simple HR estimate using FFT peak in hr_band_hz.
         """
         if sig.size < int(2 * fs):
             return 0
@@ -198,7 +208,6 @@ class BrainFlowMuseBrain(BrainAPI):
         x = sig.astype(np.float64)
         x = x - np.mean(x)
 
-        # windowing reduces spectral leakage
         w = np.hamming(len(x))
         xw = x * w
 
@@ -213,7 +222,6 @@ class BrainFlowMuseBrain(BrainAPI):
         f_peak = freqs[mask][int(np.argmax(spec[mask]))]
         hr = int(round(float(f_peak) * 60.0))
 
-        # clamp sane HR
         if hr < 30 or hr > 220:
             return 0
         return hr
@@ -233,8 +241,8 @@ class BrainFlowMuseBrain(BrainAPI):
         if data is None or data.shape[1] < n:
             return BrainMetrics(0.0, 0.0, 0, 0)
 
-        # Not worn -> zeros (your requested behavior)
-        if not self._signal_is_valid(data):
+        # ✅ Not worn -> zeros ONLY when ALL EEG channels invalid
+        if not self._is_worn(data):
             self._focus_hist.clear()
             self._fatigue_hist.clear()
             return BrainMetrics(0.0, 0.0, 0, 0)
@@ -271,25 +279,19 @@ class BrainFlowMuseBrain(BrainAPI):
 
             if ppg_data is not None and ppg_data.shape[1] >= n_ppg:
                 try:
-                    # Muse 2 example: red = channel[0], ir = channel[1]
-                    # (BrainFlow’s own example uses this mapping)
                     red = ppg_data[self.ppg_channels[0]]
                     ir = ppg_data[self.ppg_channels[1]] if len(self.ppg_channels) > 1 else None
 
-                    # HR estimate (use IR if possible, else red)
                     sig_for_hr = ir if ir is not None else red
                     hr = self._estimate_hr_from_ppg(sig_for_hr, self.ppg_fs)
 
-                    # SpO2 via BrainFlow if we have both IR + RED
                     if ir is not None:
                         oxy = DataFilter.get_oxygen_level(ir, red, self.ppg_fs)
-                        # returns float percentage
                         spo2 = int(round(float(oxy))) if oxy is not None else 0
                         if spo2 < 0 or spo2 > 100:
                             spo2 = 0
 
                 except Exception:
-                    # keep 0/0 if anything fails
                     hr = 0
                     spo2 = 0
 

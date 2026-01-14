@@ -1,4 +1,3 @@
-# neurotempo/ui/session.py
 import time
 from collections import deque
 
@@ -85,6 +84,12 @@ class SessionScreen(QWidget):
         # warm-up (skip first couple reads)
         self._warmup_skip = 2
         self._warmup_seen = 0
+
+        # ✅ not-worn debounce
+        self._not_worn_ticks = 0
+        self._worn_ticks = 0
+        self._not_worn_hold = 2   # require 2 consecutive seconds not worn
+        self._worn_hold = 1       # require 1 second worn to clear
 
         # history buffers (60 points)
         self.max_points = 60
@@ -257,7 +262,7 @@ class SessionScreen(QWidget):
         self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
         self.hr_curve.setData(list(self.x_hist), list(self.hr_hist))
 
-        # Log zeros (as requested)
+        # Log zeros
         try:
             self.logger.log(0.0, 0.0, 0, 0)
         except Exception:
@@ -274,10 +279,19 @@ class SessionScreen(QWidget):
             print("[Neurotempo] Session update error:", repr(e))
             return
 
-        # If brain layer is gating, treat zeros as "not worn"
-        if float(m.focus) == 0.0 and float(m.fatigue) == 0.0 and int(m.heart_rate or 0) == 0 and int(m.spo2 or 0) == 0:
-            self._render_not_worn()
+        # ✅ New: use brain last_worn, not "all zeros" heuristic
+        worn = bool(getattr(self.brain, "last_worn", True))
+
+        if not worn:
+            self._not_worn_ticks += 1
+            self._worn_ticks = 0
+            if self._not_worn_ticks >= self._not_worn_hold:
+                self._render_not_worn()
             return
+        else:
+            self._worn_ticks += 1
+            if self._worn_ticks >= self._worn_hold:
+                self._not_worn_ticks = 0
 
         self.signal_ok = True
 
@@ -290,7 +304,7 @@ class SessionScreen(QWidget):
         self.samples += 1
         self.focus_sum += float(m.focus)
 
-        # vitals (store even if you later implement real values)
+        # vitals
         self._last_hr = int(m.heart_rate) if m.heart_rate is not None else self._last_hr
         self._last_spo2 = int(m.spo2) if m.spo2 is not None else self._last_spo2
 
@@ -346,7 +360,7 @@ class SessionScreen(QWidget):
         self.focus_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(self.focus_ema)}; }}")
         self.fatigue_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {bar_color(1.0 - self.fatigue_ema)}; }}")
 
-        # Vitals: show numbers (zeros already handled above)
+        # Vitals
         self.hr_value.setText(f"{int(self._last_hr)} bpm")
         self.spo2_value.setText(f"{int(self._last_spo2)} %")
 
