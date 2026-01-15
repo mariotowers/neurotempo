@@ -58,7 +58,9 @@ class SessionScreen(QWidget):
         self.threshold_max = float(getattr(self.settings, "threshold_max", 0.60))
 
         # derived + state
-        self.focus_ema = self.baseline_focus
+        # ✅ IMPORTANT: start focus_ema from "neutral good" in the RELATIVE space (0..1)
+        # We keep focus in 0..1 after calibration mapping.
+        self.focus_ema = 0.70
         self.fatigue_ema = 0.25
         self.low_seconds = 0
         self.last_break_ts = 0.0
@@ -93,7 +95,7 @@ class SessionScreen(QWidget):
 
         # history buffers (60 points)
         self.max_points = 60
-        self.focus_hist = deque([self.baseline_focus] * self.max_points, maxlen=self.max_points)
+        self.focus_hist = deque([self.focus_ema] * self.max_points, maxlen=self.max_points)
         self.hr_hist = deque([0] * self.max_points, maxlen=self.max_points)
         self.x_hist = deque(range(-self.max_points + 1, 1), maxlen=self.max_points)
 
@@ -230,7 +232,9 @@ class SessionScreen(QWidget):
         self.timer.start(1000)
 
     def _low_threshold(self) -> float:
-        raw = self.baseline_focus * float(self.threshold_multiplier)
+        # Keep this simple in 0..1 space.
+        # With personalization, focus is already calibrated, so thresholds can stay 0..1.
+        raw = float(self.threshold_multiplier)
         return max(float(self.threshold_min), min(float(self.threshold_max), raw))
 
     def _fatigue_gate(self) -> float:
@@ -300,9 +304,16 @@ class SessionScreen(QWidget):
         if self._warmup_seen <= self._warmup_skip:
             return
 
-        # stats
+        # ✅ PERSONALIZE focus using calibration baseline (per-person)
+        raw_focus = float(m.focus)
+        rel_focus = raw_focus / max(self.baseline_focus, 0.25)
+
+        # Keep UI simple: clamp to 0..1
+        rel_focus = max(0.0, min(1.0, float(rel_focus)))
+
+        # stats (use personalized focus)
         self.samples += 1
-        self.focus_sum += float(m.focus)
+        self.focus_sum += rel_focus
 
         # vitals
         self._last_hr = int(m.heart_rate) if m.heart_rate is not None else self._last_hr
@@ -316,12 +327,12 @@ class SessionScreen(QWidget):
             self.spo2_sum += int(m.spo2)
             self.spo2_samples += 1
 
-        # logging
-        self.logger.log(m.focus, m.fatigue, int(self._last_hr), int(self._last_spo2))
+        # logging (log personalized focus)
+        self.logger.log(rel_focus, float(m.fatigue), int(self._last_hr), int(self._last_spo2))
 
         # EMA
         a = float(self.ema_alpha)
-        self.focus_ema = (1.0 - a) * self.focus_ema + a * float(m.focus)
+        self.focus_ema = (1.0 - a) * self.focus_ema + a * rel_focus
         self.fatigue_ema = (1.0 - a) * self.fatigue_ema + a * float(m.fatigue)
 
         # Break logic
@@ -364,7 +375,7 @@ class SessionScreen(QWidget):
         self.hr_value.setText(f"{int(self._last_hr)} bpm")
         self.spo2_value.setText(f"{int(self._last_spo2)} %")
 
-        # Status (original logic)
+        # Status
         if in_grace:
             self.state_value.setText("⚪ Settling in…")
         elif self.focus_ema >= 0.65:
@@ -381,8 +392,8 @@ class SessionScreen(QWidget):
                     else "🔵 Low focus (not fatigued)"
                 )
 
-        # Charts
-        self.focus_hist.append(float(m.focus))
+        # Charts (use personalized focus)
+        self.focus_hist.append(float(self.focus_ema))
         self.focus_curve.setData(list(self.x_hist), list(self.focus_hist))
 
         self.hr_hist.append(int(self._last_hr))
@@ -399,13 +410,13 @@ class SessionScreen(QWidget):
 
         duration_s = int(time.time() - self.start_ts)
 
-        avg_focus = (self.focus_sum / self.samples) if self.samples > 0 else self.baseline_focus
+        avg_focus = (self.focus_sum / self.samples) if self.samples > 0 else float(self.focus_ema)
         avg_hr = int(round(self.hr_sum / self.hr_samples)) if self.hr_samples > 0 else 0
         avg_spo2 = int(round(self.spo2_sum / self.spo2_samples)) if self.spo2_samples > 0 else 0
 
         summary = {
             "duration_s": duration_s,
-            "baseline": self.baseline_focus,
+            "baseline": float(self.baseline_focus),
             "avg_focus": max(0.0, min(1.0, float(avg_focus))),
             "breaks": int(self.breaks_triggered),
             "avg_hr": int(avg_hr),

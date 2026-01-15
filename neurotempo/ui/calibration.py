@@ -189,8 +189,18 @@ class CalibrationScreen(QWidget):
             self.timer.stop()
             self._running = False
 
-            baseline_focus = sum(self._samples) / max(1, len(self._samples))
-            baseline_focus = max(0.0, min(1.0, baseline_focus))
+            # ✅ FIX: robust baseline (percentile), not mean
+            # This makes calibration fair across different brains.
+            samples = sorted(self._samples)
+            if not samples:
+                baseline_focus = 0.35
+            else:
+                idx = int(0.65 * len(samples))  # 65th percentile
+                idx = max(0, min(len(samples) - 1, idx))
+                baseline_focus = float(samples[idx])
+
+            # ✅ Safety clamp to prevent "permanent red" on low-amplitude brains
+            baseline_focus = float(max(0.25, min(1.0, baseline_focus)))
 
             self._target_value = 100.0
             self.progress.setStyleSheet(self._progress_style_done)
