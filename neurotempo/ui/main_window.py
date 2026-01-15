@@ -1,5 +1,6 @@
 # neurotempo/ui/main_window.py
 import sys
+import time
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -11,10 +12,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
 )
-from PySide6.QtCore import Qt, QRectF, QTimer
+from PySide6.QtCore import Qt, QRectF, QTimer, QThread, Signal
 from PySide6.QtGui import QPainterPath, QRegion, QGuiApplication
 
-from brainflow.board_shim import BoardShim  # noqa: F401
+from brainflow.board_shim import BoardShim
 
 from neurotempo.ui.style import APP_QSS
 from neurotempo.ui.titlebar import TitleBar
@@ -38,6 +39,41 @@ from neurotempo.ui.muse_disconnect_dialog import MuseDisconnectDialog
 from neurotempo.brain.brainflow_muse import BrainFlowMuseBrain, MuseNotReady
 
 
+# =========================
+# One-shot reconnect worker (background)
+# =========================
+class _OneShotReconnectWorker(QThread):
+    done = Signal(bool, str)  # ok, message
+
+    def __init__(self, brain: BrainFlowMuseBrain):
+        super().__init__()
+        self.brain = brain
+
+    def run(self):
+        try:
+            # Hard reset is the most reliable on macOS when stream stalls
+            try:
+                self.brain.stop()
+            except Exception:
+                pass
+
+            try:
+                BoardShim.release_all_sessions()
+            except Exception:
+                pass
+
+            # Give CoreBluetooth time to fully release
+            time.sleep(1.0)
+
+            self.brain.start()
+            self.done.emit(True, "reconnected")
+        except Exception as e:
+            self.done.emit(False, repr(e))
+
+
+# ==================================================
+# Muse Not Ready Screen (simple, no flow changes)
+# ==================================================
 class MuseBlockerScreen(QWidget):
     def __init__(self, on_retry):
         super().__init__()
@@ -85,6 +121,9 @@ class MuseBlockerScreen(QWidget):
         self.msg.setText(text)
 
 
+# ==================================================
+# Main Window
+# ==================================================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -160,6 +199,7 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.container)
         self.setCentralWidget(outer)
 
+        # Screens
         self.device_select = DeviceSelectScreen(
             brain=self.brain,
             on_connected=self.on_device_selected,
@@ -206,18 +246,29 @@ class MainWindow(QMainWindow):
 
         self._place_safely()
 
-        # ✅ Watchdog state
+        # Watchdog state
         self._disconnect_modal_open = False
-        self._last_data_count = None
+        self._reconnecting = False
+        self._resume_widget = None
+
+        # ✅ timestamp-based stall detection (fixes ring-buffer false positives)
+        self._last_sample_ts = None
         self._stale_ticks = 0
+
+        # ✅ one-shot auto reconnect state
+        self._auto_reconnect_inflight = False
+        self._auto_worker = None
+
         self._start_connection_watchdog()
 
+    # Splash-only controls
     def _set_splash_only_controls(self, enabled: bool):
         try:
             self.titlebar.set_splash_buttons_enabled(enabled)
         except Exception:
             pass
 
+    # Device handling
     def on_device_selected(self, device_id: str):
         save_device_id(device_id)
         self.brain.set_device_id(device_id)
@@ -244,83 +295,143 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.device_select)
         self._set_splash_only_controls(False)
 
+    # Muse gate
     def _ensure_muse(self) -> bool:
         if getattr(self.brain, "_connected", False):
             return True
 
+        self._reconnecting = True
         try:
             self.brain.start()
             self.titlebar.set_device_connected(True)
-            self._last_data_count = None
-            self._stale_ticks = 0
-            return True
-        except MuseNotReady as e:
-            self.titlebar.set_device_connected(False)
-            self.muse_blocker.set_message(str(e))
-            self.stack.setCurrentWidget(self.muse_blocker)
-            self._set_splash_only_controls(False)
-            return False
-        except Exception as e:
-            self.titlebar.set_device_connected(False)
-            self.muse_blocker.set_message(f"Muse error: {e}")
-            self.stack.setCurrentWidget(self.muse_blocker)
-            self._set_splash_only_controls(False)
-            return False
 
+            # reset watchdog state after connect
+            self._last_sample_ts = None
+            self._stale_ticks = 0
+
+            return True
+        except MuseNotReady:
+            self.titlebar.set_device_connected(False)
+            return False
+        except Exception:
+            self.titlebar.set_device_connected(False)
+            return False
+        finally:
+            self._reconnecting = False
+
+    # -----------------------
+    # Watchdog (timestamp-based)
+    # -----------------------
     def _start_connection_watchdog(self):
         self._conn_watch_timer = QTimer(self)
-        self._conn_watch_timer.setInterval(600)  # ✅ faster than 1s
+
+        # Slightly slower = less BLE pressure, fewer false triggers
+        self._conn_watch_timer.setInterval(700)
+
         self._conn_watch_timer.timeout.connect(self._watch_muse_connection)
         self._conn_watch_timer.start()
 
     def _watch_muse_connection(self):
         if self._disconnect_modal_open:
             return
+        if self._reconnecting:
+            return
+        if self._auto_reconnect_inflight:
+            return
 
         if not getattr(self.brain, "_connected", False):
-            self._last_data_count = None
+            self._last_sample_ts = None
             self._stale_ticks = 0
             return
 
         board = getattr(self.brain, "board", None)
         if board is None:
-            self._last_data_count = None
+            self._last_sample_ts = None
             self._stale_ticks = 0
             return
 
         try:
-            count = int(board.get_board_data_count())
+            # Read 1 latest sample and check timestamp channel
+            ts_ch = int(BoardShim.get_timestamp_channel(self.brain.board_id))
+            sample = board.get_current_board_data(1)
 
-            if self._last_data_count is None:
-                self._last_data_count = count
-                self._stale_ticks = 0
-                return
-
-            if count <= self._last_data_count:
+            if sample is None or sample.shape[1] < 1:
                 self._stale_ticks += 1
             else:
-                self._stale_ticks = 0
-                self._last_data_count = count
+                ts = float(sample[ts_ch, -1])
+
+                if self._last_sample_ts is None:
+                    self._last_sample_ts = ts
+                    self._stale_ticks = 0
+                    return
+
+                if ts <= self._last_sample_ts:
+                    self._stale_ticks += 1
+                else:
+                    self._stale_ticks = 0
+                    self._last_sample_ts = ts
 
         except Exception:
             self._stale_ticks += 1
 
-        # ✅ faster trigger (~1.2s)
-        if self._stale_ticks >= 2:
-            self._last_data_count = None
+        # ✅ require ~7 seconds of true stall before auto reconnect
+        # 10 ticks × 700ms ≈ 7.0s
+        if self._stale_ticks >= 10:
+            self._last_sample_ts = None
             self._stale_ticks = 0
-            self._show_disconnect_modal()
+            self._silent_auto_reconnect_once()
 
-    def _show_disconnect_modal(self):
-        self._disconnect_modal_open = True
-
+    # ✅ ONE silent auto reconnect attempt
+    def _silent_auto_reconnect_once(self):
+        self._auto_reconnect_inflight = True
         try:
             self.titlebar.set_device_connected(False)
         except Exception:
             pass
 
+        # Keep the current screen (session/calibration stays visible)
         try:
-            self.brain.stop()
+            self._resume_widget = self.stack.currentWidget()
+        except Exception:
+            self._resume_widget = None
+
+        # Stop any previous worker
+        try:
+            if self._auto_worker and self._auto_worker.isRunning():
+                self._auto_worker.quit()
+                self._auto_worker.wait(250)
+        except Exception:
+            pass
+
+        self._auto_worker = _OneShotReconnectWorker(self.brain)
+        self._auto_worker.done.connect(self._on_auto_reconnect_done)
+        self._auto_worker.start()
+
+    def _on_auto_reconnect_done(self, ok: bool, msg: str):
+        self._auto_reconnect_inflight = False
+
+        if ok:
+            try:
+                self.titlebar.set_device_connected(True)
+            except Exception:
+                pass
+            # keep current screen running
+            return
+
+        # Auto reconnect failed -> show blocking alert
+        self._show_disconnect_modal()
+
+    # Modal (manual actions if auto reconnect failed)
+    def _show_disconnect_modal(self):
+        self._disconnect_modal_open = True
+
+        try:
+            self._resume_widget = self.stack.currentWidget()
+        except Exception:
+            self._resume_widget = None
+
+        try:
+            self.titlebar.set_device_connected(False)
         except Exception:
             pass
 
@@ -329,19 +440,35 @@ class MainWindow(QMainWindow):
         self._disconnect_modal_open = False
 
         if result == MuseDisconnectDialog.ACTION_RETRY:
-            ok = self._ensure_muse()
-            if ok:
-                try:
-                    self.titlebar.set_device_connected(True)
-                except Exception:
-                    pass
-            else:
-                self.stack.setCurrentWidget(self.muse_blocker)
-                self._set_splash_only_controls(False)
+
+            def do_retry():
+                ok = self._ensure_muse()
+                if ok:
+                    try:
+                        self.titlebar.set_device_connected(True)
+                    except Exception:
+                        pass
+
+                    if self._resume_widget and self._resume_widget not in (self.device_select, self.settings):
+                        self.stack.setCurrentWidget(self._resume_widget)
+                    self._resume_widget = None
+                else:
+                    self.muse_blocker.set_message(
+                        "Couldn’t reconnect. Make sure Muse is on and not connected to another app."
+                    )
+                    self.stack.setCurrentWidget(self.muse_blocker)
+                    self._set_splash_only_controls(False)
+                    self._resume_widget = None
+
+            QTimer.singleShot(900, do_retry)
 
         elif result == MuseDisconnectDialog.ACTION_CHANGE:
+            self._resume_widget = None
             self.go_device_select()
+        else:
+            self._resume_widget = None
 
+    # Navigation
     def go_splash(self):
         self.stack.setCurrentWidget(self.splash)
         self._set_splash_only_controls(True)
@@ -349,12 +476,14 @@ class MainWindow(QMainWindow):
     def go_presession(self, *_):
         self._set_splash_only_controls(False)
         if not self._ensure_muse():
+            self.stack.setCurrentWidget(self.muse_blocker)
             return
         self.stack.setCurrentWidget(self.presession)
 
     def go_calibration(self):
         self._set_splash_only_controls(False)
         if not self._ensure_muse():
+            self.stack.setCurrentWidget(self.muse_blocker)
             return
         self.stack.setCurrentWidget(self.calibration)
 
@@ -397,6 +526,7 @@ class MainWindow(QMainWindow):
     def go_back_from_settings(self):
         self.go_splash()
 
+    # Window shape & shutdown
     def _place_safely(self):
         screen = QGuiApplication.primaryScreen()
         if screen:
@@ -429,6 +559,13 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "_conn_watch_timer") and self._conn_watch_timer:
                 self._conn_watch_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            if self._auto_worker and self._auto_worker.isRunning():
+                self._auto_worker.quit()
+                self._auto_worker.wait(500)
         except Exception:
             pass
 

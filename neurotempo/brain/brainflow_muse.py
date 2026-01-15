@@ -1,5 +1,3 @@
-#neurotempo/brain/brainflow_muse.py
-
 from __future__ import annotations
 
 from collections import deque
@@ -23,15 +21,13 @@ class MuseNotReady(Exception):
 
 class BrainFlowMuseBrain(BrainAPI):
     """
-    Muse 2 backend:
-    - EEG focus/fatigue from band powers
-    - PPG HR (estimated) + SpO2 via BrainFlow get_oxygen_level
-    - If NOT WORN: returns zeros (focus/fatigue/hr/spo2)
+    Muse 2 backend (stable + anti-fake-focus + hiccup smoothing)
 
-    ✅ UPDATE:
-    - "Not worn" triggers ONLY when ALL EEG channels are invalid.
-    - If at least ONE EEG channel is valid, we consider it worn.
-    - Exposes: self.last_worn and self.last_valid_eeg_count for the UI.
+    ✅ No ratio explosion focus (no beta/(alpha+theta))
+    ✅ Noise sanity gate rejects "table noise"
+    ✅ Debounced worn detection
+    ✅ Warm-up gate to avoid 0..50 jitter at the beginning
+    ✅ NEW: Grace-hold (keeps last good metrics during short BLE hiccups)
     """
 
     def __init__(
@@ -68,10 +64,29 @@ class BrainFlowMuseBrain(BrainAPI):
         self._focus_hist = deque(maxlen=self.smooth_n)
         self._fatigue_hist = deque(maxlen=self.smooth_n)
 
+        # wearing/contact state (UI)
         self.last_valid_eeg_count: int = 0
         self.last_worn: bool = False
 
-    # ✅ NEW
+        # debug
+        self.last_reject_reason: str = ""
+
+        # Debounce + warmup
+        self._worn_hits = 0
+        self._not_worn_hits = 0
+        self._debounce_needed = 3
+        self._warmup_reads_needed = 4
+        self._warmup_reads_left = 0
+
+        # ✅ Grace hold (hide short dropouts)
+        self._grace_hold_sec = 2.5  # keep last good values up to this long
+        self._grace_reads_left = 0
+        self._last_good = BrainMetrics(0.0, 0.0, 0, 0)
+
+    # -----------------------
+    # Lifecycle
+    # -----------------------
+
     def set_device_id(self, device_id: Optional[str]):
         self.device_id = device_id
 
@@ -86,6 +101,7 @@ class BrainFlowMuseBrain(BrainAPI):
         try:
             self.board.prepare_session()
 
+            # Enable PPG streaming (safe if ignored)
             try:
                 self.board.config_board("p50")
             except Exception:
@@ -120,7 +136,36 @@ class BrainFlowMuseBrain(BrainAPI):
             except Exception:
                 self.ppg_fs = 64
 
+            # Flush ring buffer
+            try:
+                cnt = int(self.board.get_board_data_count())
+                if cnt > 0:
+                    self.board.get_board_data(cnt)
+            except Exception:
+                pass
+            try:
+                cnt2 = int(self.board.get_board_data_count(BrainFlowPresets.ANCILLARY_PRESET))
+                if cnt2 > 0:
+                    self.board.get_board_data(cnt2, BrainFlowPresets.ANCILLARY_PRESET)
+            except Exception:
+                pass
+
             self._connected = True
+            self._focus_hist.clear()
+            self._fatigue_hist.clear()
+
+            self.last_valid_eeg_count = 0
+            self.last_worn = False
+            self.last_reject_reason = ""
+
+            # warmup when we start streaming
+            self._worn_hits = 0
+            self._not_worn_hits = 0
+            self._warmup_reads_left = self._warmup_reads_needed
+
+            # grace hold reset
+            self._grace_reads_left = 0
+            self._last_good = BrainMetrics(0.0, 0.0, 0, 0)
 
         except Exception as e:
             self.stop()
@@ -144,22 +189,20 @@ class BrainFlowMuseBrain(BrainAPI):
             self._fatigue_hist.clear()
             self.last_valid_eeg_count = 0
             self.last_worn = False
+            self.last_reject_reason = ""
+            self._worn_hits = 0
+            self._not_worn_hits = 0
+            self._warmup_reads_left = 0
+            self._grace_reads_left = 0
+            self._last_good = BrainMetrics(0.0, 0.0, 0, 0)
 
-    def _channel_valid_mask(self, data: np.ndarray) -> np.ndarray:
-        eeg = data[self.eeg_channels, :]
-        stds = np.std(eeg, axis=1)
-        return (stds > 8.0) & (stds < 250.0)
-
-    def _is_worn(self, data: np.ndarray) -> bool:
-        valid = self._channel_valid_mask(data)
-        self.last_valid_eeg_count = int(np.sum(valid))
-        self.last_worn = self.last_valid_eeg_count > 0
-        return self.last_worn
+    # -----------------------
+    # Helpers
+    # -----------------------
 
     def _get_current_data(self, n: int, preset=None) -> Optional[np.ndarray]:
         if not self.board:
             return None
-
         try:
             if preset is None:
                 return self.board.get_current_board_data(n)
@@ -172,15 +215,58 @@ class BrainFlowMuseBrain(BrainAPI):
         except Exception:
             return None
 
+    def _channel_valid_mask(self, data: np.ndarray) -> np.ndarray:
+        eeg = data[self.eeg_channels, :]
+        stds = np.std(eeg, axis=1)
+        return (stds > 3.0) & (stds < 250.0)
+
+    def _vote_worn(self, worn_now: bool) -> bool:
+        prev = self.last_worn
+
+        if worn_now:
+            self._worn_hits += 1
+            self._not_worn_hits = 0
+        else:
+            self._not_worn_hits += 1
+            self._worn_hits = 0
+
+        if self._worn_hits >= self._debounce_needed:
+            self.last_worn = True
+        elif self._not_worn_hits >= self._debounce_needed:
+            self.last_worn = False
+
+        # If state changed, start warmup suppression
+        if self.last_worn != prev:
+            self._warmup_reads_left = self._warmup_reads_needed
+
+        return self.last_worn
+
+    def _noise_sanity_gate(self, theta: float, alpha: float, beta: float) -> bool:
+        at = alpha + theta
+        if beta > 0.55 and at < 0.20:
+            self.last_reject_reason = "noise_beta_dominant"
+            return False
+        if beta > 0.75:
+            self.last_reject_reason = "noise_extreme_beta"
+            return False
+        return True
+
+    def _focus_from_bands(self, theta: float, alpha: float, beta: float) -> float:
+        raw = (1.15 * beta) + (0.25 * alpha) - (0.90 * theta)
+        x = (raw + 0.25) / 0.75
+        return float(np.clip(x, 0.0, 1.0))
+
+    def _fatigue_from_bands(self, theta: float, alpha: float, beta: float) -> float:
+        raw = (1.10 * theta) + (0.20 * alpha) - (0.60 * beta)
+        x = (raw + 0.10) / 0.70
+        return float(np.clip(x, 0.0, 1.0))
+
     def _estimate_hr_from_ppg(self, sig: np.ndarray, fs: int) -> int:
         if sig.size < int(2 * fs):
             return 0
-
         x = sig.astype(np.float64)
         x = x - np.mean(x)
-
-        w = np.hamming(len(x))
-        xw = x * w
+        xw = x * np.hamming(len(x))
 
         freqs = np.fft.rfftfreq(len(xw), d=1.0 / float(fs))
         spec = np.abs(np.fft.rfft(xw))
@@ -192,26 +278,55 @@ class BrainFlowMuseBrain(BrainAPI):
 
         f_peak = freqs[mask][int(np.argmax(spec[mask]))]
         hr = int(round(float(f_peak) * 60.0))
-
-        if hr < 30 or hr > 220:
+        if hr < 35 or hr > 200:
             return 0
         return hr
+
+    def _begin_grace_hold(self):
+        # convert seconds to "read cycles"
+        reads = int(max(1, round(self._grace_hold_sec / max(self.window_sec, 0.5))))
+        self._grace_reads_left = reads
+
+    def _grace_return(self) -> BrainMetrics:
+        if self._grace_reads_left > 0:
+            self._grace_reads_left -= 1
+            return self._last_good
+        return BrainMetrics(0.0, 0.0, 0, 0)
+
+    # -----------------------
+    # Metrics
+    # -----------------------
 
     def read_metrics(self) -> BrainMetrics:
         if not self._connected or not self.board:
             raise MuseNotReady("Muse not connected")
 
+        self.last_reject_reason = ""
+
         n = int(self.window_sec * self.fs)
         data = self._get_current_data(n)
 
+        # If we fail to read enough data, treat as hiccup -> grace hold
         if data is None or data.shape[1] < n:
-            return BrainMetrics(0.0, 0.0, 0, 0)
+            if self._grace_reads_left == 0 and (self._last_good.heart_rate != 0 or self._last_good.focus != 0.0):
+                self._begin_grace_hold()
+            return self._grace_return()
 
-        if not self._is_worn(data):
+        valid = self._channel_valid_mask(data)
+        self.last_valid_eeg_count = int(np.sum(valid))
+
+        worn_now = self.last_valid_eeg_count > 0
+        worn = self._vote_worn(worn_now)
+
+        # If debounced says not worn -> grace hold (not instant zero)
+        if not worn:
+            if self._grace_reads_left == 0 and (self._last_good.heart_rate != 0 or self._last_good.focus != 0.0):
+                self._begin_grace_hold()
             self._focus_hist.clear()
             self._fatigue_hist.clear()
-            return BrainMetrics(0.0, 0.0, 0, 0)
+            return self._grace_return()
 
+        # Band powers
         rel_powers, _ = DataFilter.get_avg_band_powers(
             data,
             self.eeg_channels,
@@ -219,12 +334,26 @@ class BrainFlowMuseBrain(BrainAPI):
             True
         )
         _, theta, alpha, beta, _ = rel_powers
+        theta = float(theta); alpha = float(alpha); beta = float(beta)
 
-        focus = beta / max(alpha + theta, 1e-6)
-        fatigue = theta / max(alpha + beta, 1e-6)
+        # Noise sanity gate -> grace hold (don’t spam “not worn” for 1–2 hiccup windows)
+        if not self._noise_sanity_gate(theta, alpha, beta):
+            self._vote_worn(False)
+            if self._grace_reads_left == 0 and (self._last_good.heart_rate != 0 or self._last_good.focus != 0.0):
+                self._begin_grace_hold()
+            self._focus_hist.clear()
+            self._fatigue_hist.clear()
+            return self._grace_return()
 
-        focus = float(np.clip(focus, 0.0, 1.0))
-        fatigue = float(np.clip(fatigue, 0.0, 1.0))
+        # Warmup suppression
+        if self._warmup_reads_left > 0:
+            self._warmup_reads_left -= 1
+            self._focus_hist.clear()
+            self._fatigue_hist.clear()
+            return BrainMetrics(0.0, 0.0, 0, 0)
+
+        focus = self._focus_from_bands(theta, alpha, beta)
+        fatigue = self._fatigue_from_bands(theta, alpha, beta)
 
         self._focus_hist.append(focus)
         self._fatigue_hist.append(fatigue)
@@ -232,9 +361,9 @@ class BrainFlowMuseBrain(BrainAPI):
         focus_s = float(np.mean(self._focus_hist))
         fatigue_s = float(np.mean(self._fatigue_hist))
 
+        # PPG only when worn and stable
         hr = 0
         spo2 = 0
-
         if self.ppg_channels:
             n_ppg = int(self.ppg_window_sec * self.ppg_fs)
             ppg_data = self._get_current_data(n_ppg, preset=BrainFlowPresets.ANCILLARY_PRESET)
@@ -243,26 +372,30 @@ class BrainFlowMuseBrain(BrainAPI):
                 try:
                     red = ppg_data[self.ppg_channels[0]]
                     ir = ppg_data[self.ppg_channels[1]] if len(self.ppg_channels) > 1 else None
-
                     sig_for_hr = ir if ir is not None else red
                     hr = self._estimate_hr_from_ppg(sig_for_hr, self.ppg_fs)
 
-                    if ir is not None:
+                    if ir is not None and hr > 0:
                         oxy = DataFilter.get_oxygen_level(ir, red, self.ppg_fs)
                         spo2 = int(round(float(oxy))) if oxy is not None else 0
-                        if spo2 < 0 or spo2 > 100:
+                        if spo2 < 70 or spo2 > 100:
                             spo2 = 0
-
                 except Exception:
                     hr = 0
                     spo2 = 0
 
-        return BrainMetrics(
+        out = BrainMetrics(
             focus=focus_s,
             fatigue=fatigue_s,
             heart_rate=int(hr),
             spo2=int(spo2),
         )
+
+        # ✅ Save as last good + clear grace hold
+        self._last_good = out
+        self._grace_reads_left = 0
+
+        return out
 
     def sample_focus(self) -> float:
         return float(self.read_metrics().focus)
